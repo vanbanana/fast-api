@@ -1,89 +1,51 @@
+"""OpenAI 兼容 LLM 客户端。
+
+只保留一条 function-calling 传输通道 `_call_function_tool`，
+五种业务调用复用同一传输层；提示词全部来自 app.prompt_library。
+"""
 import json
 from typing import Any
 
 import httpx
 
 from app.config import settings
+from app.prompt_library import load_lines, render
 
 
 class MimoClient:
-    """OpenAI-compatible LLM 客户端，用于角色决策测试。"""
+    """OpenAI-compatible LLM 客户端，function calling 统一走 _call_function_tool。"""
 
     def __init__(self) -> None:
         self._url = settings.mimo_base_url.rstrip("/") + "/chat/completions"
+        self.usage_totals: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+
+    def usage_snapshot(self) -> dict[str, int]:
+        return dict(self.usage_totals)
+
+    def _record_usage(self, usage: dict[str, Any]) -> None:
+        """累计官方 usage 字段返回的 token 消耗，供前端消耗条展示。"""
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(key, 0)
+            if isinstance(value, (int, float)):
+                self.usage_totals[key] += int(value)
+        self.usage_totals["calls"] += 1
 
     async def complete_json(self, system: str, user: str) -> dict[str, Any]:
-        if not settings.llm_enabled or not settings.mimo_api_key:
+        if not self._enabled():
             return {}
-
-        payload = {
-            "model": settings.mimo_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0.4,
-            "max_completion_tokens": 1024,
-            "thinking": {"type": "disabled"},
-        }
-        headers = {
-            "Authorization": f"Bearer {settings.mimo_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
-            response = await client.post(self._url, headers=headers, json=payload)
-            response.raise_for_status()
-
-        message = response.json()["choices"][0]["message"]
-        content = (message.get("content") or message.get("reasoning_content") or "").strip()
-        if not content:
+        payload = self._base_payload(system, user, temperature=0.4, max_tokens=1024)
+        message = await self._safe_post(payload, timeout=60.0)
+        if not message:
             return {}
-
-        content = self._extract_json_object(content)
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            return {}
-
-    async def complete_agent_decision(self, system: str, user: str, target_ids: list[str]) -> dict[str, Any]:
-        """使用 MiMo/OpenAI 兼容 function calling，稳定拿到员工动作结构。"""
-        if not settings.llm_enabled or not settings.mimo_api_key:
-            return {}
-
-        payload = {
-            "model": settings.mimo_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "tools": [self._agent_decision_tool(target_ids)],
-            "tool_choice": {"type": "function", "function": {"name": "office_agent_decision"}},
-            "temperature": 0.35,
-            "max_completion_tokens": 1024,
-            "thinking": {"type": "disabled"},
-        }
-        headers = {
-            "Authorization": f"Bearer {settings.mimo_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
-            response = await client.post(self._url, headers=headers, json=payload)
-            response.raise_for_status()
-
-        message = response.json()["choices"][0]["message"]
-        for tool_call in message.get("tool_calls") or []:
-            function = tool_call.get("function") or {}
-            if function.get("name") != "office_agent_decision":
-                continue
-            try:
-                return json.loads(function.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                return self._extract_json_from_text(function.get("arguments") or "")
-
         content = (message.get("content") or message.get("reasoning_content") or "").strip()
         return self._extract_json_from_text(content)
+
+    async def complete_agent_decision(self, system: str, user: str) -> dict[str, Any]:
+        """员工决策：LLM 只产出意图（movement_type），不直接选场景坐标。"""
+        return await self._call_function_tool(
+            system, user, self._agent_decision_tool(),
+            temperature=0.35, max_tokens=1024, timeout=60.0,
+        )
 
     async def complete_meeting_reply(
         self,
@@ -96,59 +58,26 @@ class MimoClient:
         transcript: list[dict[str, str]],
     ) -> str:
         """会议发言专用调用：每次只让当前 speaker 回应共享会议上下文。"""
-        if not settings.llm_enabled or not settings.mimo_api_key:
-            return ""
-
         history = "\n".join(f"{item['speaker']}: {item['text']}" for item in transcript[-10:])
-        system = (
-            "你在模拟真实软件公司会议，不是聊天机器人。"
-            "你只能作为当前发言人说一句话，必须回应会议议题或上一位同事，不能自说自话。"
-            "必须调用 meeting_reply 工具提交发言。"
-            "reply 要像真实同事短句，32字以内，不要官腔，不要重复别人原话。"
-            "禁止使用“最好同步一下”“不然容易各做各的”“我先确认一下状态”“大家先对齐一下”这类空话。"
-            "必须带出本岗位的具体工作：目标、范围、接口、页面、测试、数据或排期之一。"
-            "句子里必须有可执行对象，例如字段、验收口径、页面状态、接口边界、回归范围、指标口径、截止时间。"
+        system = render("meeting_reply_system.md", speech_rules=render("natural_speech_rules.md"))
+        user = render(
+            "meeting_reply_user.md",
+            topic=topic,
+            participants=participants,
+            speaker_name=speaker_name,
+            speaker_role=speaker_role,
+            speaker_prompt=speaker_prompt,
+            history=history or "会议刚开始，还没有发言。",
         )
-        user = (
-            f"会议议题：{topic}\n"
-            f"参会人：{participants}\n"
-            f"当前发言人：{speaker_name} / {speaker_role}\n"
-            f"发言人人设：{speaker_prompt}\n"
-            f"已有会议记录：\n{history or '会议刚开始，还没有发言。'}\n"
-            "请给当前发言人生成下一句会议发言。"
+        data = await self._call_function_tool(
+            system, user, self._meeting_reply_tool(),
+            temperature=0.55, max_tokens=160, timeout=45.0,
         )
-        payload = {
-            "model": settings.mimo_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "tools": [self._meeting_reply_tool()],
-            "tool_choice": {"type": "function", "function": {"name": "meeting_reply"}},
-            "temperature": 0.55,
-            "max_completion_tokens": 160,
-            "thinking": {"type": "disabled"},
-        }
-        headers = {
-            "Authorization": f"Bearer {settings.mimo_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        async with httpx.AsyncClient(timeout=45.0, trust_env=False) as client:
-            response = await client.post(self._url, headers=headers, json=payload)
-            response.raise_for_status()
-
-        message = response.json()["choices"][0]["message"]
-        data = self._extract_tool_arguments(message, "meeting_reply")
-        if not data:
-            content = (message.get("content") or message.get("reasoning_content") or "").strip()
-            data = self._extract_json_from_text(content)
         reply = str(data.get("reply", "")).strip()
         for prefix in [f"{speaker_name}：", f"{speaker_name}:", f"{speaker_role}：", f"{speaker_role}:"]:
             if reply.startswith(prefix):
                 reply = reply[len(prefix) :].strip()
-        banned = ["最好同步一下", "不然容易各做各的", "我先确认一下状态", "同步一下", "各做各的", "大家先对齐", "我先了解"]
-        if any(text in reply for text in banned):
+        if any(text in reply for text in load_lines("meeting_banned_phrases.txt")):
             return ""
         return reply[:64]
 
@@ -162,50 +91,20 @@ class MimoClient:
         transcript: list[dict[str, str]],
     ) -> dict[str, Any]:
         """团队规划专用调用：让一个角色在共享上下文里产出可执行工作项。"""
-        if not settings.llm_enabled or not settings.mimo_api_key:
-            return {}
-
         history = "\n".join(f"{item['speaker']}: {item['text']}" for item in transcript[-8:])
-        system = (
-            "你在模拟真实软件公司的项目规划会。"
-            "你只能作为当前岗位补充自己的工作项、风险或依赖。"
-            "必须调用 project_plan_item 工具提交结构化工作项。"
-            "task_type 只能是 product/backend/frontend/design/qa/data/ops/general。"
-            "task_title 要是可执行任务，不要空泛。"
+        system = render("planning_reply_system.md", speech_rules=render("natural_speech_rules.md"))
+        user = render(
+            "planning_reply_user.md",
+            objective=objective,
+            speaker_name=speaker_name,
+            speaker_role=speaker_role,
+            speaker_prompt=speaker_prompt,
+            history=history or "还没有规划记录。",
         )
-        user = (
-            f"老板目标：{objective}\n"
-            f"当前发言人：{speaker_name} / {speaker_role}\n"
-            f"发言人人设：{speaker_prompt}\n"
-            f"已有规划记录：\n{history or '还没有规划记录。'}\n"
-            "请输出当前岗位应该补充的一个关键任务。"
+        data = await self._call_function_tool(
+            system, user, self._project_plan_item_tool(),
+            temperature=0.45, max_tokens=320, timeout=45.0,
         )
-        payload = {
-            "model": settings.mimo_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "tools": [self._project_plan_item_tool()],
-            "tool_choice": {"type": "function", "function": {"name": "project_plan_item"}},
-            "temperature": 0.45,
-            "max_completion_tokens": 320,
-            "thinking": {"type": "disabled"},
-        }
-        headers = {
-            "Authorization": f"Bearer {settings.mimo_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        async with httpx.AsyncClient(timeout=45.0, trust_env=False) as client:
-            response = await client.post(self._url, headers=headers, json=payload)
-            response.raise_for_status()
-
-        message = response.json()["choices"][0]["message"]
-        data = self._extract_tool_arguments(message, "project_plan_item")
-        if not data:
-            content = (message.get("content") or message.get("reasoning_content") or "").strip()
-            data = self._extract_json_from_text(content)
         return {
             "contribution": str(data.get("contribution", "")).strip()[:140],
             "task_title": str(data.get("task_title", "")).strip()[:120],
@@ -216,43 +115,12 @@ class MimoClient:
 
     async def complete_directive_route(self, directive_text: str) -> dict[str, Any]:
         """用 function calling 判断老板指令进入会议流还是工作规划流。"""
-        if not settings.llm_enabled or not settings.mimo_api_key:
-            return {}
-
-        system = (
-            "你是办公室模拟器的指令路由器，只负责分类，不参与聊天。"
-            "必须调用 office_directive_route 工具。"
-            "meeting 表示玩家明确要求员工去会议室/开会/当面集体讨论。"
-            "work 表示玩家给业务目标、开发任务、修 bug、上线目标或让团队自行推进。"
-            "如果只是普通业务目标里有“讨论/同步/对齐”等词，但没有明确要求进入会议室，也优先 work。"
+        data = await self._call_function_tool(
+            render("directive_route_system.md"),
+            f"老板指令：{directive_text}",
+            self._directive_route_tool(),
+            temperature=0.1, max_tokens=160, timeout=30.0,
         )
-        user = f"老板指令：{directive_text}"
-        payload = {
-            "model": settings.mimo_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "tools": [self._directive_route_tool()],
-            "tool_choice": {"type": "function", "function": {"name": "office_directive_route"}},
-            "temperature": 0.1,
-            "max_completion_tokens": 160,
-            "thinking": {"type": "disabled"},
-        }
-        headers = {
-            "Authorization": f"Bearer {settings.mimo_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-            response = await client.post(self._url, headers=headers, json=payload)
-            response.raise_for_status()
-
-        message = response.json()["choices"][0]["message"]
-        data = self._extract_tool_arguments(message, "office_directive_route")
-        if not data:
-            content = (message.get("content") or message.get("reasoning_content") or "").strip()
-            data = self._extract_json_from_text(content)
         route = str(data.get("route", "")).strip()
         if route not in ["meeting", "work"]:
             route = ""
@@ -275,50 +143,22 @@ class MimoClient:
         risk_note: str,
     ) -> dict[str, Any]:
         """一对一协作 handoff：目标同事按岗位给出可执行回应。"""
-        if not settings.llm_enabled or not settings.mimo_api_key:
-            return {}
-
-        system = (
-            "你在模拟真实软件公司里的一对一当面协作，不是聊天机器人。"
-            "当前只有被请教的同事发言，必须调用 colleague_reply 工具。"
-            "回应要具体、短句，能推动任务，不要寒暄，不要空泛同步。"
-            "如果信息不足，给出下一步负责人或需要补齐的字段。"
+        system = render("colleague_reply_system.md", speech_rules=render("natural_speech_rules.md"))
+        user = render(
+            "colleague_reply_user.md",
+            requester_name=requester_name,
+            requester_role=requester_role,
+            helper_name=helper_name,
+            helper_role=helper_role,
+            helper_prompt=helper_prompt,
+            task_title=task_title,
+            risk_note=risk_note or "暂无",
+            question=question,
         )
-        user = (
-            f"发起人：{requester_name} / {requester_role}\n"
-            f"被请教同事：{helper_name} / {helper_role}\n"
-            f"被请教同事人设：{helper_prompt}\n"
-            f"当前任务：{task_title}\n"
-            f"当前风险：{risk_note or '暂无'}\n"
-            f"发起人的问题：{question}\n"
-            "请让被请教同事给一句回应，并补充结构化协作结果。"
+        data = await self._call_function_tool(
+            system, user, self._colleague_reply_tool(),
+            temperature=0.45, max_tokens=260, timeout=35.0,
         )
-        payload = {
-            "model": settings.mimo_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "tools": [self._colleague_reply_tool()],
-            "tool_choice": {"type": "function", "function": {"name": "colleague_reply"}},
-            "temperature": 0.45,
-            "max_completion_tokens": 260,
-            "thinking": {"type": "disabled"},
-        }
-        headers = {
-            "Authorization": f"Bearer {settings.mimo_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        async with httpx.AsyncClient(timeout=35.0, trust_env=False) as client:
-            response = await client.post(self._url, headers=headers, json=payload)
-            response.raise_for_status()
-
-        message = response.json()["choices"][0]["message"]
-        data = self._extract_tool_arguments(message, "colleague_reply")
-        if not data:
-            content = (message.get("content") or message.get("reasoning_content") or "").strip()
-            data = self._extract_json_from_text(content)
         return {
             "reply": str(data.get("reply", "")).strip()[:90],
             "work_update": str(data.get("work_update", "")).strip()[:120],
@@ -327,29 +167,87 @@ class MimoClient:
             "confidence": self._safe_float(data.get("confidence", 0.0)),
         }
 
-    def _agent_decision_tool(self, target_ids: list[str]) -> dict[str, Any]:
-        target_schema: dict[str, Any] = {"type": "string"}
-        if target_ids:
-            target_schema["enum"] = target_ids
+    async def _call_function_tool(
+        self,
+        system: str,
+        user: str,
+        tool: dict[str, Any],
+        *,
+        temperature: float,
+        max_tokens: int,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """统一的 function calling 传输层：构造请求、强制工具、解析参数。"""
+        if not self._enabled():
+            return {}
+        tool_name = tool["function"]["name"]
+        payload = self._base_payload(system, user, temperature=temperature, max_tokens=max_tokens)
+        payload["tools"] = [tool]
+        payload["tool_choice"] = {"type": "function", "function": {"name": tool_name}}
+        message = await self._safe_post(payload, timeout=timeout)
+        if not message:
+            return {}
+        data = self._extract_tool_arguments(message, tool_name)
+        if data:
+            return data
+        content = (message.get("content") or message.get("reasoning_content") or "").strip()
+        return self._extract_json_from_text(content)
+
+    def _enabled(self) -> bool:
+        return settings.llm_enabled and bool(settings.mimo_api_key)
+
+    def _base_payload(self, system: str, user: str, *, temperature: float, max_tokens: int) -> dict[str, Any]:
+        return {
+            "model": settings.mimo_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": temperature,
+            "max_completion_tokens": max_tokens,
+            "thinking": {"type": "disabled"},
+        }
+
+    async def _safe_post(self, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        """LLM 不确定性兜底：网络/限流/响应结构异常统一返回空，调用方降级规则。"""
+        try:
+            return await self._post(payload, timeout=timeout)
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+            return {}
+
+    async def _post(self, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {settings.mimo_api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.post(self._url, headers=headers, json=payload)
+            response.raise_for_status()
+        data = response.json()
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            self._record_usage(usage)
+        return data["choices"][0]["message"]
+
+    def _agent_decision_tool(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
                 "name": "office_agent_decision",
-                "description": "给办公室模拟器提交一个员工下一步行动和可见思考流。",
+                "description": "给办公室模拟器提交一个员工下一步行动意图和可见思考流，具体地点由后端解析。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "target_id": target_schema,
                         "movement_type": {
                             "type": "string",
                             "enum": ["own_desk", "visit_colleague", "meeting", "break", "stay"],
-                            "description": "稳定工具动作：own_desk回本人固定工位；visit_colleague找同事；meeting去会议室；break休息摸鱼；stay原地整理。",
+                            "description": "行动意图：own_desk回本人固定工位；visit_colleague找同事；meeting去会议室；break休息摸鱼；stay原地整理。",
                         },
                         "colleague_id": {
                             "type": "string",
                             "description": "movement_type=visit_colleague 时填写要找的员工ID，例如 worker1；否则空字符串",
                         },
-                        "say": {"type": "string", "description": "角色自然说出的一句话"},
+                        "say": {"type": "string", "description": "角色自然说出的一句话，必须和 movement_type 描述同一件事"},
                         "status": {"type": "string", "description": "角色当前工作状态"},
                         "mood": {"type": "string", "description": "角色情绪"},
                         "focus_task": {"type": "string", "description": "角色当前关注任务"},

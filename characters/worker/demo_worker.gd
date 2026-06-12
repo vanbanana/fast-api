@@ -9,7 +9,6 @@ signal decision_requested()
 @export var arrive_distance: float = 3.0
 @export var min_wait_time: float = 1.2
 @export var max_wait_time: float = 3.0
-@export var use_avoidance: bool = false
 @export var repath_when_stuck_time: float = 1.2
 
 @export_category("角色资源")
@@ -57,15 +56,18 @@ var target_position_override: Vector2 = Vector2.ZERO
 var has_target_position_override: bool = false
 var reserved_visit_marker: Marker2D
 var reserved_visit_slot: int = -1
+var speech_pause_time: float = 0.0
 
 
 func _ready() -> void:
 	rng.randomize()
+	# 每个人步速略有差异，避免所有角色同速同步的机械感。
+	walk_speed *= rng.randf_range(0.82, 1.18)
 	navigation_agent.target_desired_distance = arrive_distance
 	navigation_agent.path_desired_distance = arrive_distance
-	navigation_agent.avoidance_enabled = use_avoidance
-	if use_avoidance:
-		navigation_agent.velocity_computed.connect(_on_velocity_computed)
+	# 角色间避让走软分离（_get_separation_velocity），不用 RVO：
+	# RVO 的 velocity_computed 每个物理帧都会回调，会把静止角色推走、移动角色原地打转。
+	navigation_agent.avoidance_enabled = false
 	wait_timer.timeout.connect(_on_wait_timer_timeout)
 
 	if character_texture:
@@ -93,6 +95,15 @@ func _physics_process(delta: float) -> void:
 	if current_target == null:
 		return
 
+	# 路上说话时停下站住，说完再继续走。
+	if speech_pause_time > 0.0:
+		speech_pause_time -= delta
+		velocity = Vector2.ZERO
+		move_and_slide()
+		if speech_pause_time <= 0.0:
+			animation_player.play(walk_animation)
+		return
+
 	if navigation_agent.is_navigation_finished():
 		_arrive_at_target()
 		return
@@ -112,12 +123,8 @@ func _physics_process(delta: float) -> void:
 
 	sprite.flip_h = direction.x < 0
 
-	var next_velocity := direction * walk_speed + _get_separation_velocity()
-	if use_avoidance:
-		navigation_agent.velocity = next_velocity
-	else:
-		velocity = next_velocity
-		move_and_slide()
+	velocity = direction * walk_speed + _get_separation_velocity()
+	move_and_slide()
 	_update_stuck_state(delta)
 
 
@@ -132,10 +139,10 @@ func _choose_next_target() -> void:
 	var target_pool := _collect_available_markers(seat_marker_group if next_target_is_seat else idle_marker_group)
 	if target_pool.is_empty():
 		_play_idle()
-		wait_timer.start(rng.randf_range(min_wait_time, max_wait_time))
+		wait_timer.start(_natural_wait())
 		return
 
-	current_target = target_pool[rng.randi_range(0, target_pool.size() - 1)]
+	current_target = _pick_weighted_marker(target_pool)
 	current_target_is_seat = next_target_is_seat
 	next_target_is_seat = !next_target_is_seat
 
@@ -188,6 +195,10 @@ func visit_marker_id(target_id: StringName) -> bool:
 	wait_timer.stop()
 	_reserve_visit_slot(marker)
 	target_position_override = marker.global_position + _get_visit_offset(marker, reserved_visit_slot)
+	# 对方不在工位附近时，直奔对方当前位置，而不是去空工位傻等。
+	var target_worker := _find_worker_for_desk(marker)
+	if target_worker != null and target_worker.global_position.distance_to(marker.global_position) > 40.0:
+		target_position_override = target_worker.global_position + Vector2(rng.randf_range(-14.0, 14.0), 14.0)
 	has_target_position_override = true
 	_begin_target(marker, false)
 	return true
@@ -207,9 +218,13 @@ func set_external_decision_enabled(enabled: bool) -> void:
 
 
 func wait_for_next_decision() -> void:
-	# 后端返回 idle 时使用，避免员工卡住不再进入自主循环。
-	_play_idle()
-	wait_timer.start(rng.randf_range(min_wait_time, max_wait_time))
+	# 后端返回 idle/say 时使用，避免员工卡住不再进入自主循环。
+	# 已经坐在座位上时保持入座动画，否则会出现"坐着却播放站立动画"的视觉 bug。
+	if current_target == null and reserved_seat != null:
+		_play_seat_animation(reserved_seat)
+	else:
+		_play_idle()
+	wait_timer.start(_natural_wait())
 
 
 func _begin_target(marker: Marker2D, is_seat: bool) -> void:
@@ -255,7 +270,53 @@ func _arrive_at_target() -> void:
 	has_target_position_override = false
 	stuck_time = 0.0
 	last_position = global_position
-	wait_timer.start(rng.randf_range(min_wait_time, max_wait_time))
+	wait_timer.start(_natural_wait())
+
+
+func pause_for_speech(char_count: int, face_point: Vector2 = Vector2.INF) -> void:
+	# 说话时长随台词长度估算，站住期间面向对方。
+	if current_target == null:
+		return
+	speech_pause_time = clampf(1.2 + float(char_count) / 9.0, 1.6, 6.0)
+	if face_point != Vector2.INF:
+		sprite.flip_h = face_point.x < global_position.x
+	velocity = Vector2.ZERO
+	_play_idle()
+
+
+func _natural_wait() -> float:
+	# 偏短停留为主、偶尔长停留，比均匀随机更像真人节奏。
+	var base := min_wait_time + (max_wait_time - min_wait_time) * pow(rng.randf(), 2.0)
+	if rng.randf() < 0.15:
+		base *= 2.5
+	return base
+
+
+func _pick_weighted_marker(pool: Array[Marker2D]) -> Marker2D:
+	# 就近优先的加权随机：近处目标权重高，但仍有概率去远处。
+	var weights: Array[float] = []
+	var total := 0.0
+	for marker in pool:
+		var w := 1.0 / (global_position.distance_to(marker.global_position) + 60.0)
+		weights.append(w)
+		total += w
+	var roll := rng.randf() * total
+	for i in pool.size():
+		roll -= weights[i]
+		if roll <= 0.0:
+			return pool[i]
+	return pool[pool.size() - 1]
+
+
+func _find_worker_for_desk(marker: Marker2D) -> Node2D:
+	var marker_name := str(marker.name)
+	if !marker_name.ends_with("Marker"):
+		return null
+	var owner_name := marker_name.trim_suffix("Marker")
+	for node in get_tree().get_nodes_in_group(worker_group):
+		if node is Node2D and str(node.name) == owner_name:
+			return node
+	return null
 
 
 func _get_separation_velocity() -> Vector2:
@@ -499,7 +560,4 @@ func _on_wait_timer_timeout() -> void:
 	_choose_next_target()
 
 
-func _on_velocity_computed(safe_velocity: Vector2) -> void:
-	velocity = safe_velocity
-	move_and_slide()
-	_update_stuck_state(get_physics_process_delta_time())
+

@@ -4,6 +4,7 @@ from typing import Protocol
 
 from app.config import settings
 from app.domain import CompanyProject, OfficeTargets, ProjectTask
+from app.office_clock import office_clock
 
 
 STATE_MEETING_ASSIGNED = "meeting_assigned"
@@ -22,6 +23,8 @@ class WorkerBehaviorLike(Protocol):
     assigned_meeting_seat: str
     energy: float
     stress: float
+    personality: str
+    work_style: str
 
 
 @dataclass(frozen=True)
@@ -60,7 +63,7 @@ def choose_rule_behavior(
 
     has_work = bool(worker.current_directive or active_task)
     if not has_work:
-        if targets.idle_points and rand.random() < settings.break_chance:
+        if targets.idle_points and rand.random() < settings.break_chance * office_clock.break_bias() * persona_break_bias(worker):
             return BehaviorDecision(STATE_BREAK, rand.choice(targets.idle_points), "roam", active_task)
         if targets.roam_points:
             return BehaviorDecision(STATE_FREE_ROAM, rand.choice(targets.roam_points), "roam", active_task)
@@ -68,7 +71,7 @@ def choose_rule_behavior(
             return BehaviorDecision(STATE_FREE_ROAM, own_desk, "roam", active_task)
         return None
 
-    if should_take_break(worker) and targets.idle_points:
+    if should_take_break(worker, rng=rand) and targets.idle_points:
         return BehaviorDecision(STATE_BREAK, rand.choice(targets.idle_points), "normal", active_task)
 
     if own_desk:
@@ -76,13 +79,29 @@ def choose_rule_behavior(
     return BehaviorDecision(STATE_WAIT, "", "normal", active_task)
 
 
-def should_take_break(worker: WorkerBehaviorLike) -> bool:
-    """休息是员工状态驱动，不由会议或工作文本触发。"""
+def should_take_break(worker: WorkerBehaviorLike, *, rng: random.Random | None = None) -> bool:
+    """休息是员工状态驱动，不由会议或工作文本触发；叠加时段和人设偏置。"""
     if worker.energy <= settings.low_energy_rest_threshold:
         return True
     if worker.stress >= settings.high_stress_rest_threshold:
         return True
-    return random.random() < settings.break_chance
+    rand = rng or random
+    return rand.random() < settings.break_chance * office_clock.break_bias() * persona_break_bias(worker)
+
+
+_DILIGENT_WORDS = ["严谨", "自律", "专注", "加班", "卷", "高效", "节奏快"]
+_RELAXED_WORDS = ["随性", "摸鱼", "悠闲", "佛系", "慢热", "放松", "社交"]
+
+
+def persona_break_bias(worker: WorkerBehaviorLike) -> float:
+    """人设影响行为频率：严谨自律的人少休息，随性佛系的人多休息。"""
+    text = f"{worker.personality}{worker.work_style}"
+    bias = 1.0
+    if any(word in text for word in _DILIGENT_WORDS):
+        bias *= 0.6
+    if any(word in text for word in _RELAXED_WORDS):
+        bias *= 1.6
+    return bias
 
 
 def status_for_behavior_state(state: str, has_work: bool) -> str:

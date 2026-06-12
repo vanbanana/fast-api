@@ -1,47 +1,15 @@
-from typing import Protocol
+"""模型输出到员工 ID 的归一化。
 
-from app.domain import OfficeTargets
+目标选择已由 worker_intent.resolve_decision 统一负责，
+这里只保留把姓名/岗位/工位 Marker 收敛成 worker_id 的工具。
+"""
+from typing import Protocol
 
 
 class WorkerLike(Protocol):
     worker_id: str
     name: str
     role: str
-    assigned_meeting_seat: str
-    seeking_helper_id: str
-    checked_helper_desk: bool
-
-
-def llm_work_targets(worker: WorkerLike, targets: OfficeTargets) -> list[str]:
-    """普通工作候选不含会议椅；会议椅只能由会议运行态分配。"""
-    own_desk = targets.own_desk(worker.worker_id)
-    work_targets: list[str] = []
-    if own_desk:
-        work_targets.append(own_desk)
-    work_targets.extend(targets.roam_points)
-    return work_targets
-
-
-def enforce_fixed_workstation_target(worker: WorkerLike, data: dict[str, object], targets: OfficeTargets, travel_mode: str) -> str:
-    """把模型目标收束到固定工位/拜访/会议三种安全路径。"""
-    target_id = str(data.get("target_id", "") or "").strip()
-    own_desk = targets.own_desk(worker.worker_id)
-    if worker.assigned_meeting_seat and target_id == worker.assigned_meeting_seat:
-        return "meeting"
-    if target_id in targets.meeting_seats():
-        if own_desk:
-            data["target_id"] = own_desk
-        return "normal"
-    other_worker_id = worker_id_from_desk_marker(target_id)
-    if other_worker_id and other_worker_id != worker.worker_id:
-        data["needs_help_from"] = other_worker_id
-        worker.seeking_helper_id = other_worker_id
-        worker.checked_helper_desk = False
-        return "visit"
-    if target_id.endswith("Marker") and target_id != own_desk and own_desk:
-        data["target_id"] = own_desk
-        return "normal"
-    return travel_mode
 
 
 def normalize_colleague_id(value: str, self_worker_id: str, agents: dict[str, WorkerLike]) -> str:

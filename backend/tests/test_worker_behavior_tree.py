@@ -24,6 +24,8 @@ class FakeWorker:
     assigned_meeting_seat: str = ""
     energy: float = 1.0
     stress: float = 0.1
+    personality: str = ""
+    work_style: str = ""
 
 
 def verify_behavior_tree() -> None:

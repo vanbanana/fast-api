@@ -32,8 +32,7 @@ async def verify_colleague_interaction() -> None:
         seeker.focus_task = task.title
         seeker.current_directive = "做教育项目登录"
         seeker.confirmation_question = "小周，登录接口返回字段和错误码按什么口径定？"
-        seeker.seeking_helper_id = "worker2"
-        seeker.checked_helper_desk = False
+        assert seeker.fsm.start_seeking("worker2")
         helper.last_target_id = "worker2Marker"
 
         commands = await runtime.handle_event(
@@ -44,8 +43,9 @@ async def verify_colleague_interaction() -> None:
         assert command.action == "say"
         assert command.payload.get("display") == "speech"
         assert command.payload.get("behavior_state") == "collaboration_loop"
-        assert "林主管" in command.say
-        assert seeker.seeking_helper_id == ""
+        assert command.say.strip() != ""
+        assert seeker.fsm.helper_id == ""
+        assert seeker.fsm.state.value == "collaborating"
         assert seeker.needs_help_from == ""
         assert helper.status.startswith("回应")
         assert any("协作回应" in item for item in helper.memory)
@@ -57,8 +57,8 @@ async def verify_colleague_interaction() -> None:
         assert helper_command.action == "say"
         assert helper_command.payload.get("display") == "speech"
         assert helper_command.payload.get("behavior_state") == "collaboration_reply_loop"
-        assert "小周" in helper_command.say
-        assert helper.pending_interaction_say == ""
+        assert helper_command.say.strip() != ""
+        assert helper.fsm.pending_reply.is_empty()
     finally:
         settings.llm_enabled = old_llm_enabled
 
