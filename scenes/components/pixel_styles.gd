@@ -28,9 +28,9 @@ func apply_speech_bubble_style(panel: PanelContainer) -> void:
 	style.set_border_width_all(theme.speech_border_width)
 	style.set_corner_radius_all(theme.speech_corner_radius)
 	style.set_content_margin(SIDE_LEFT, 4.0)
-	style.set_content_margin(SIDE_TOP, 3.0)
+	style.set_content_margin(SIDE_TOP, 2.0)
 	style.set_content_margin(SIDE_RIGHT, 4.0)
-	style.set_content_margin(SIDE_BOTTOM, 3.0)
+	style.set_content_margin(SIDE_BOTTOM, 2.0)
 	panel.add_theme_stylebox_override("panel", style)
 
 

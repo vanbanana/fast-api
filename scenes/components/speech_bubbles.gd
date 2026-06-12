@@ -32,13 +32,13 @@ func setup(ui_theme: PixelUiTheme, worker_nodes: Dictionary) -> void:
 		panel.z_index = 200
 		panel.z_as_relative = false
 		panel.position = theme.speech_bubble_offset
-		panel.custom_minimum_size = theme.speech_bubble_size
+		panel.custom_minimum_size = Vector2(theme.speech_bubble_size.x, 0)
 		panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		_styles.apply_speech_bubble_style(panel)
 		worker.add_child(panel)
 
 		var scroll := ScrollContainer.new()
-		scroll.custom_minimum_size = Vector2(theme.speech_bubble_size.x - 8.0, theme.speech_bubble_max_height)
+		scroll.custom_minimum_size = Vector2(theme.speech_bubble_size.x - 8.0, theme.speech_font_size + 4.0)
 		scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 		scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
@@ -90,6 +90,8 @@ func _process(delta: float) -> void:
 			continue
 
 		var mode := str(_modes.get(worker_id, "hidden"))
+		if mode != "hidden":
+			_fit_bubble(worker_id)
 		if mode == "hidden":
 			panel.visible = false
 		elif mode == "thinking":
@@ -196,6 +198,21 @@ func _color_for_status(text: String) -> Color:
 		if text.contains(keyword):
 			return Color(0.62, 1.0, 0.66)
 	return Color(0.85, 0.85, 0.85)
+
+
+func _fit_bubble(worker_id: String) -> void:
+	# 气泡高度随内容自适应（封顶后内部滚动），并始终挂在状态小气泡上方，不遮挡人物。
+	var panel := _panels[worker_id] as PanelContainer
+	var label := _labels[worker_id] as Label
+	var scroll := _scrolls[worker_id] as ScrollContainer
+	if panel == null or label == null or scroll == null:
+		return
+	var content_height: float = label.get_minimum_size().y
+	var fit_height: float = clampf(content_height, theme.speech_font_size + 4.0, theme.speech_bubble_max_height)
+	if absf(scroll.custom_minimum_size.y - fit_height) > 0.5:
+		scroll.custom_minimum_size.y = fit_height
+	panel.reset_size()
+	panel.position = Vector2(-panel.size.x / 2.0, theme.status_bubble_offset.y - 4.0 - panel.size.y)
 
 
 func _scroll_to_bottom(worker_id: String) -> void:

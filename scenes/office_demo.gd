@@ -403,6 +403,35 @@ func _show_speech(worker_id: String, text: String) -> void:
 	if phone_ui != null:
 		var profile: Dictionary = local_worker_profiles.get(worker_id, {})
 		phone_ui.add_chat_message(str(profile.get("name", worker_id)), text, false)
+	_pause_speakers_for_chat(worker_id, text)
+
+
+func _pause_speakers_for_chat(worker_id: String, text: String) -> void:
+	# 说话的人停下站住；附近的对话对象也停下并面向说话者，像真人交谈。
+	var speaker := worker_nodes.get(worker_id) as Node2D
+	if speaker == null or !speaker.has_method(&"pause_for_speech"):
+		return
+	var partner := _nearest_worker_within(speaker, 30.0)
+	if partner != null:
+		speaker.pause_for_speech(text.length(), partner.global_position)
+		if partner.has_method(&"pause_for_speech"):
+			partner.pause_for_speech(text.length(), speaker.global_position)
+	else:
+		speaker.pause_for_speech(text.length())
+
+
+func _nearest_worker_within(speaker: Node2D, radius: float) -> Node2D:
+	var nearest: Node2D = null
+	var nearest_distance := radius
+	for other in worker_nodes.values():
+		var node := other as Node2D
+		if node == null or node == speaker:
+			continue
+		var distance := speaker.global_position.distance_to(node.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = node
+	return nearest
 
 
 func _update_status_bubble(worker_id: String) -> void:
