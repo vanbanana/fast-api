@@ -9,7 +9,6 @@ signal decision_requested()
 @export var arrive_distance: float = 3.0
 @export var min_wait_time: float = 1.2
 @export var max_wait_time: float = 3.0
-@export var use_avoidance: bool = true
 @export var repath_when_stuck_time: float = 1.2
 
 @export_category("角色资源")
@@ -63,10 +62,9 @@ func _ready() -> void:
 	rng.randomize()
 	navigation_agent.target_desired_distance = arrive_distance
 	navigation_agent.path_desired_distance = arrive_distance
-	navigation_agent.avoidance_enabled = use_avoidance
-	if use_avoidance:
-		navigation_agent.radius = 5.0
-		navigation_agent.velocity_computed.connect(_on_velocity_computed)
+	# 角色间避让走软分离（_get_separation_velocity），不用 RVO：
+	# RVO 的 velocity_computed 每个物理帧都会回调，会把静止角色推走、移动角色原地打转。
+	navigation_agent.avoidance_enabled = false
 	wait_timer.timeout.connect(_on_wait_timer_timeout)
 
 	if character_texture:
@@ -113,12 +111,8 @@ func _physics_process(delta: float) -> void:
 
 	sprite.flip_h = direction.x < 0
 
-	var next_velocity := direction * walk_speed + _get_separation_velocity()
-	if use_avoidance:
-		navigation_agent.velocity = next_velocity
-	else:
-		velocity = next_velocity
-		move_and_slide()
+	velocity = direction * walk_speed + _get_separation_velocity()
+	move_and_slide()
 	_update_stuck_state(delta)
 
 
@@ -504,7 +498,4 @@ func _on_wait_timer_timeout() -> void:
 	_choose_next_target()
 
 
-func _on_velocity_computed(safe_velocity: Vector2) -> void:
-	velocity = safe_velocity
-	move_and_slide()
-	_update_stuck_state(get_physics_process_delta_time())
+
