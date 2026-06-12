@@ -8,6 +8,7 @@ from autogen_agentchat.teams import RoundRobinGroupChat
 from autogen_core import CancellationToken
 
 from app.llm_client import llm_client
+from app.prompt_library import load_lines, render
 
 
 @dataclass(frozen=True)
@@ -150,15 +151,7 @@ async def run_round_robin_meeting(
 
 def _meeting_task(topic: str, participants: list[MeetingParticipant]) -> str:
     roster = "、".join(f"{item.name}/{item.role}" for item in participants)
-    return (
-        f"会议议题：{topic}\n"
-        f"参会人：{roster}\n"
-        "请按真实软件公司会议推进：项目经理先收束目标，产品补用户和验收，工程补技术边界，测试补风险和回归。"
-        "每次只说一句，必须回应前文，不要重复同一句。"
-        "禁止说“这个最好同步一下”“不然容易各做各的”这种空话。"
-        "每句必须包含岗位相关的具体名词，例如字段、接口、页面状态、验收口径、回归范围、指标、排期、风险。"
-        "不要说泛泛的“这个项目”“先了解一下”“同步一下”，要直接给结论或下一步。"
-    )
+    return render("meeting_task.md", topic=topic, roster=roster)
 
 
 def _topic_label(topic: str) -> str:
@@ -177,8 +170,7 @@ def _clean_meeting_text(text: str) -> str:
     for prefix in ["会议发言：", "发言：", "回复："]:
         if cleaned.startswith(prefix):
             cleaned = cleaned[len(prefix) :].strip()
-    banned = ["最好同步一下", "不然容易各做各的", "我先确认一下状态", "同步一下", "各做各的", "先了解一下"]
-    if any(item in cleaned for item in banned):
+    if any(item in cleaned for item in load_lines("meeting_banned_phrases.txt")):
         return ""
     if len(cleaned) < 6:
         return ""

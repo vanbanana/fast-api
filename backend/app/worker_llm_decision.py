@@ -1,10 +1,15 @@
+"""LLM 员工决策的提示词组装和输出清洗。
+
+LLM 只产出 ActionIntent（movement_type），不再直接选场景坐标；
+所有可见文本统一清洗，防止 function calling 残片泄露给玩家。
+"""
 from typing import Protocol
 
-from app.config import settings
-from app.domain import CompanyProject, OfficeTargets, ProjectTask
+from app.domain import CompanyProject, ProjectTask
 from app.memory import memory_store
+from app.prompt_library import render
 from app.schemas import WorkerEvent
-from app.worker_decision_policy import llm_work_targets
+from app.worker_intent import WorkerDecision, parse_intent
 from app.worker_rule_context import build_confirmation_question
 
 
@@ -18,7 +23,6 @@ class WorkerLLMLike(Protocol):
     stress: float
     focus_task: str
     current_directive: str
-    autonomy_steps: int
     memory: list[str]
 
     def roleplay_prompt(self) -> str:
@@ -28,40 +32,58 @@ class WorkerLLMLike(Protocol):
 def build_agent_decision_messages(
     worker: WorkerLLMLike,
     event: WorkerEvent,
-    targets: OfficeTargets,
     company: CompanyProject,
     active_task: ProjectTask | None,
+    colleagues: list[str],
 ) -> tuple[str, str]:
     task_text = active_task.snapshot().model_dump() if active_task else "无"
-    system = (
-        "你正在扮演一家小型软件公司的真实员工，不是通用机器人。"
-        "你要像真实同事一样考虑岗位职责、性格、压力、任务上下文、同事关系和老板指令。"
-        "玩家只输入一次初始业务目标，公司内部员工必须自行补全需求、拆解任务、确认验收和解决协作问题。"
-        "技术、验收、接口、设计问题走项目经理、产品、架构师、测试或对应同事的内部协作链。"
-        "你的输出会驱动游戏角色移动和公司任务状态，所以必须具体、短句、贴近办公室工作。"
-        "必须调用 office_agent_decision 工具提交结果。"
-        "movement_type 必须按真实办公室动作选择：正常工作用 own_desk；要找人用 visit_colleague；讨论评审用 meeting；只有疲劳、高压或明确摸鱼休息才用 break。"
-        "stream_lines 是玩家能看到的角色内心/工作流短句，不要写模型推理链。"
-        f"可选工作目标：{llm_work_targets(worker, targets)}。"
-        f"休息目标只在明确休息、疲劳或摸鱼时使用：{targets.idle_points}。"
-    )
-    user = (
-        f"{worker.roleplay_prompt()}"
-        f"长期记忆和压缩上下文：{memory_store.build_context(worker.worker_id, worker.focus_task + worker.current_directive + worker.role)}。"
-        f"当前状态：{worker.status}；心情：{worker.mood}；精力：{worker.energy:.2f}。"
-        f"压力：{worker.stress:.2f}；当前任务：{worker.focus_task}；任务对象：{task_text}；老板指令：{worker.current_directive or '无'}。"
-        f"公司士气：{company.morale:.2f}；发布风险：{company.release_risk:.2f}。"
-        f"自主循环次数：{worker.autonomy_steps}/{settings.max_autonomy_steps}。"
-        f"刚收到事件：{event.model_dump()}。最近记忆：{worker.memory[-10:]}。"
+    system = render("agent_decision_system.md")
+    user = render(
+        "agent_decision_user.md",
+        roleplay_prompt=worker.roleplay_prompt(),
+        memory_context=memory_store.build_context(worker.worker_id, worker.focus_task + worker.current_directive + worker.role),
+        status=worker.status,
+        mood=worker.mood,
+        energy=worker.energy,
+        stress=worker.stress,
+        focus_task=worker.focus_task,
+        task_text=task_text,
+        directive=worker.current_directive or "无",
+        morale=company.morale,
+        release_risk=company.release_risk,
+        colleagues=colleagues,
+        event_text=event.model_dump(),
+        recent_memory=worker.memory[-10:],
     )
     return system, user
+
+
+def decision_from_llm_data(data: dict[str, object], active_task: ProjectTask | None) -> WorkerDecision:
+    """把工具调用原始参数转成结构化 WorkerDecision，并清洗可见文本。"""
+    cleaned = normalize_llm_decision(data, active_task)
+    return WorkerDecision(
+        intent=parse_intent(cleaned.get("movement_type")),
+        helper_id=text_value(cleaned.get("colleague_id", "")).strip(),
+        say=text_value(cleaned.get("say", ""))[:60],
+        status=text_value(cleaned.get("status", ""))[:30],
+        mood=text_value(cleaned.get("mood", ""))[:20],
+        focus_task=text_value(cleaned.get("focus_task", ""))[:60],
+        intent_text=text_value(cleaned.get("intent", "")),
+        work_update=text_value(cleaned.get("work_update", "")),
+        risk_note=text_value(cleaned.get("risk_note", ""))[:100],
+        needs_help_from=text_value(cleaned.get("needs_help_from", ""))[:20],
+        confirmation_question=text_value(cleaned.get("confirmation_question", ""))[:100],
+        memory_note=text_value(cleaned.get("memory_note", "")),
+        confidence=safe_confidence(cleaned.get("confidence", 0.0)),
+        stream_lines=list(cleaned.get("stream_lines", [])),
+        source="llm",
+    )
 
 
 def normalize_llm_decision(data: dict[str, object], active_task: ProjectTask | None) -> dict[str, object]:
     """清洗 function calling 偶发的工具参数残片，避免玩家看到后台格式。"""
     cleaned: dict[str, object] = dict(data)
     text_keys = [
-        "target_id",
         "movement_type",
         "colleague_id",
         "say",

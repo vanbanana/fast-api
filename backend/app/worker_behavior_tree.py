@@ -68,7 +68,7 @@ def choose_rule_behavior(
             return BehaviorDecision(STATE_FREE_ROAM, own_desk, "roam", active_task)
         return None
 
-    if should_take_break(worker) and targets.idle_points:
+    if should_take_break(worker, rng=rand) and targets.idle_points:
         return BehaviorDecision(STATE_BREAK, rand.choice(targets.idle_points), "normal", active_task)
 
     if own_desk:
@@ -76,13 +76,14 @@ def choose_rule_behavior(
     return BehaviorDecision(STATE_WAIT, "", "normal", active_task)
 
 
-def should_take_break(worker: WorkerBehaviorLike) -> bool:
+def should_take_break(worker: WorkerBehaviorLike, *, rng: random.Random | None = None) -> bool:
     """休息是员工状态驱动，不由会议或工作文本触发。"""
     if worker.energy <= settings.low_energy_rest_threshold:
         return True
     if worker.stress >= settings.high_stress_rest_threshold:
         return True
-    return random.random() < settings.break_chance
+    rand = rng or random
+    return rand.random() < settings.break_chance
 
 
 def status_for_behavior_state(state: str, has_work: bool) -> str:

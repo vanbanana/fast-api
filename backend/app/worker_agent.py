@@ -1,4 +1,10 @@
-﻿import random
+"""单个员工 agent。
+
+职责收敛为编排：事件记录 -> 协作流 -> 任务同步 -> 反应层 -> 决策。
+决策由 LLM 或规则行为树产出统一的 WorkerDecision（意图），再经
+worker_intent.resolve_decision 解析为具体目标；运行态由 fsm 承载。
+"""
+import random
 from dataclasses import dataclass, field
 
 from app.config import settings
@@ -6,14 +12,34 @@ from app.domain import BossDirective, CompanyProject, OfficeTargets, ProjectTask
 from app.llm_client import llm_client
 from app.memory import memory_store
 from app.schemas import AgentCommand, AgentSnapshot, WorkerEvent
-from app.worker_behavior_tree import STATE_BREAK, choose_rule_behavior, status_for_behavior_state
-from app.worker_decision_policy import enforce_fixed_workstation_target, llm_work_targets, normalize_colleague_id, worker_id_from_desk_marker
-from app.worker_llm_decision import agent_stream_lines, build_agent_decision_messages, clean_visible_text, normalize_llm_decision, safe_confidence, text_value
+from app.worker_behavior_tree import STATE_BREAK, STATE_FREE_ROAM, STATE_MEETING_ASSIGNED, STATE_WAIT, choose_rule_behavior, should_take_break, status_for_behavior_state
+from app.worker_collaboration import consume_pending_reply, continue_find_person_flow
+from app.worker_decision_policy import normalize_colleague_id
+from app.worker_intent import ActionIntent, WorkerDecision, apply_resolution, downgrade_to_desk, resolve_decision
+from app.worker_llm_decision import agent_stream_lines, build_agent_decision_messages, decision_from_llm_data, safe_confidence, text_value
 from app.worker_rule_context import build_confirmation_question, build_rule_work_context, should_confirm_with_team
+from app.worker_state import WorkerState, WorkerStateMachine
+
+_STATE_BY_INTENT = {
+    ActionIntent.WORK_AT_DESK: WorkerState.WORKING,
+    ActionIntent.VISIT_COLLEAGUE: WorkerState.SEEKING_COLLEAGUE,
+    ActionIntent.JOIN_MEETING: WorkerState.MEETING,
+    ActionIntent.TAKE_BREAK: WorkerState.RESTING,
+    ActionIntent.ROAM: WorkerState.ROAMING,
+    ActionIntent.STAY: WorkerState.IDLE,
+}
+
+_INTENT_BY_BEHAVIOR_STATE = {
+    STATE_MEETING_ASSIGNED: ActionIntent.JOIN_MEETING,
+    STATE_BREAK: ActionIntent.TAKE_BREAK,
+    STATE_FREE_ROAM: ActionIntent.ROAM,
+    STATE_WAIT: ActionIntent.STAY,
+}
+
 
 @dataclass
 class OfficeAgent:
-    """单个员工，拥有独立人设、职业职责、短期记忆和自主循环计数。"""
+    """单个员工，拥有独立人设、职业职责、短期记忆和显式运行态状态机。"""
 
     worker_id: str
     name: str
@@ -39,12 +65,8 @@ class OfficeAgent:
     needs_help_from: str = ""
     current_risk: str = ""
     confirmation_question: str = ""
-    seeking_helper_id: str = ""
-    checked_helper_desk: bool = False
     assigned_meeting_seat: str = ""
-    pending_interaction_from: str = ""
-    pending_interaction_say: str = ""
-    pending_interaction_context: dict[str, object] = field(default_factory=dict)
+    fsm: WorkerStateMachine = field(default_factory=WorkerStateMachine)
     memory: list[str] = field(default_factory=list)
 
     def remember(self, text: str) -> None:
@@ -69,12 +91,8 @@ class OfficeAgent:
         self.needs_help_from = ""
         self.current_risk = ""
         self.confirmation_question = ""
-        self.seeking_helper_id = ""
-        self.checked_helper_desk = False
         self.assigned_meeting_seat = ""
-        self.pending_interaction_from = ""
-        self.pending_interaction_say = ""
-        self.pending_interaction_context = {}
+        self.fsm.reset()
 
     def apply_directive(self, directive: BossDirective, task: ProjectTask | None = None) -> None:
         self.current_directive = directive.text
@@ -91,11 +109,12 @@ class OfficeAgent:
         self.remember(f"老板指令:{directive.text}")
 
     async def decide(self, event: WorkerEvent, targets: OfficeTargets, company: CompanyProject, agents: dict[str, "OfficeAgent"] | None = None) -> AgentCommand:
+        agents = agents or {}
         self._record_event(event)
-        pending_command = self._consume_pending_interaction()
+        pending_command = consume_pending_reply(self)
         if pending_command:
             return pending_command
-        find_command = await self._continue_find_person_flow(event, targets, agents or {})
+        find_command = await continue_find_person_flow(self, event, targets, agents)
         if find_command:
             return find_command
         self._sync_task_focus(company)
@@ -104,92 +123,118 @@ class OfficeAgent:
         if reaction_command:
             return reaction_command
         if not targets.all_targets():
-            return self._idle_command("还没有同步场景目标。")
+            return self.idle_command("还没有同步场景目标。")
 
         if self.autonomy_steps >= settings.max_autonomy_steps:
             self.cooldown_steps = settings.loop_cooldown_steps
             self.autonomy_steps = 0
-            return self._idle_command("自主循环达到上限，短暂整理状态。")
+            self.fsm.transition(WorkerState.COOLDOWN)
+            return self.idle_command("自主循环达到上限，短暂整理状态。")
 
         if self.cooldown_steps > 0:
             self.cooldown_steps -= 1
-            return self._idle_command("整理记忆和任务优先级。")
+            return self.idle_command("整理记忆和任务优先级。")
 
         self.autonomy_steps += 1
-        if event.type == "boss_command":
-            return self._decide_with_rules(targets, company)
-        if not self.current_directive and not company.task_for_agent(self.worker_id):
-            return self._decide_with_rules(targets, company)
-        if random.random() <= settings.llm_decision_chance:
-            llm_command = await self._decide_with_llm(event, targets, company, agents or {})
-            if llm_command:
-                return llm_command
+        decision: WorkerDecision | None = None
+        if self._should_use_llm(event, company):
+            decision = await self._llm_decision(event, company, agents)
+        if decision is None:
+            decision = self._rule_decision(targets, company)
+        return self._execute_decision(decision, targets, company, agents)
 
-        return self._decide_with_rules(targets, company)
+    def _should_use_llm(self, event: WorkerEvent, company: CompanyProject) -> bool:
+        """boss 指令即时反馈走规则；只有有明确工作上下文时才花 LLM 配额。"""
+        if event.type == "boss_command":
+            return False
+        if not self.current_directive and not company.task_for_agent(self.worker_id):
+            return False
+        return random.random() <= settings.llm_decision_chance
+
+    async def _llm_decision(self, event: WorkerEvent, company: CompanyProject, agents: dict[str, "OfficeAgent"]) -> WorkerDecision | None:
+        active_task = company.tasks.get(self.active_task_id)
+        colleagues = [f"{agent.worker_id}={agent.name}/{agent.role}" for agent in agents.values() if agent.worker_id != self.worker_id]
+        system, user = build_agent_decision_messages(self, event, company, active_task, colleagues)
+        try:
+            data = await llm_client.complete_agent_decision(system, user)
+        except Exception:
+            return None
+        if not data:
+            return None
+        decision = decision_from_llm_data(data, active_task)
+        decision.helper_id = normalize_colleague_id(decision.helper_id or decision.needs_help_from, self.worker_id, agents)
+        if decision.needs_help_from:
+            decision.needs_help_from = decision.helper_id
+        if decision.helper_id and decision.intent in (ActionIntent.WORK_AT_DESK, ActionIntent.STAY):
+            decision.intent = ActionIntent.VISIT_COLLEAGUE
+        if self.assigned_meeting_seat and self._directive_is_meeting():
+            decision.intent = ActionIntent.JOIN_MEETING
+        return decision
+
+    def _rule_decision(self, targets: OfficeTargets, company: CompanyProject) -> WorkerDecision:
+        behavior = choose_rule_behavior(self, targets, company)
+        if behavior is None:
+            return WorkerDecision(intent=ActionIntent.STAY, intent_text="暂时没有合适目标", source="rule")
+        intent = _INTENT_BY_BEHAVIOR_STATE.get(behavior.state, ActionIntent.WORK_AT_DESK)
+        decision = WorkerDecision(intent=intent, behavior_state=behavior.state, source="rule")
+        decision.status = status_for_behavior_state(behavior.state, bool(self.current_directive or behavior.active_task))
+        return decision
+
+    def _execute_decision(self, decision: WorkerDecision, targets: OfficeTargets, company: CompanyProject, agents: dict[str, "OfficeAgent"]) -> AgentCommand:
+        wants_break = should_take_break(self)
+        if self.fsm.can_transition(_STATE_BY_INTENT[decision.intent]):
+            resolved = resolve_decision(
+                self, decision, targets, set(agents.keys()),
+                allow_break=wants_break or decision.source == "rule",
+            )
+        else:
+            resolved = downgrade_to_desk(self, targets, "当前状态不允许这个动作，先回工位推进")
+        decision = apply_resolution(decision, resolved)
+
+        if decision.source == "rule":
+            active_task = company.tasks.get(self.active_task_id)
+            context = build_rule_work_context(self, decision.target_id or "本工位", active_task)
+            decision.intent_text = decision.intent_text or str(context["intent"])
+            decision.say = decision.say or str(context["say"])
+            decision.work_update = str(context["work_update"])
+            decision.risk_note = str(context.get("risk_note", ""))
+            decision.needs_help_from = str(context.get("needs_help_from", ""))
+            decision.confirmation_question = str(context.get("confirmation_question", ""))
+            decision.confidence = float(context.get("confidence", 0.68))
+            decision.memory_note = str(context.get("memory_note", ""))
+            self.mood = self._mood_for_state()
+
+        self._apply_fsm_for_intent(decision)
+        if decision.status:
+            self.status = decision.status[:30]
+        if decision.mood:
+            self.mood = decision.mood[:20]
+        if decision.focus_task:
+            self.focus_task = decision.focus_task[:60]
+        if decision.intent == ActionIntent.TAKE_BREAK:
+            self.energy = min(1.0, self.energy + 0.08)
+            self.stress = max(0.05, self.stress - 0.08)
+        self._apply_work_context(decision.as_context(), company)
+        self.remember(f"{'LLM' if decision.source == 'llm' else '规则'}决策:{decision.target_id}:{self.status}")
+
+        if decision.intent == ActionIntent.STAY or not decision.target_id:
+            return self.idle_command(decision.say, decision.as_context())
+        return self.move_command(decision.target_id, decision.say, decision.as_context(), decision.travel_mode)
+
+    def _apply_fsm_for_intent(self, decision: WorkerDecision) -> None:
+        target_state = _STATE_BY_INTENT[decision.intent]
+        if decision.intent == ActionIntent.VISIT_COLLEAGUE:
+            if not self.fsm.start_seeking(decision.helper_id):
+                return
+            self.needs_help_from = decision.helper_id
+            return
+        self.fsm.transition(target_state)
 
     def _record_event(self, event: WorkerEvent) -> None:
         self.last_target_id = event.target_id or self.last_target_id
         if event.type == "worker_arrived":
             self.energy = max(0.1, self.energy - 0.015)
             self.status = f"到达 {event.target_id}"
-
-    async def _decide_with_llm(self, event: WorkerEvent, targets: OfficeTargets, company: CompanyProject, agents: dict[str, "OfficeAgent"]) -> AgentCommand | None:
-        active_task = company.tasks.get(self.active_task_id)
-        system, user = build_agent_decision_messages(self, event, targets, company, active_task)
-        wants_break = self._should_take_break()
-        allowed_targets = targets.all_targets() if wants_break else llm_work_targets(self, targets)
-        data = await llm_client.complete_agent_decision(system, user, allowed_targets)
-        data = normalize_llm_decision(data, active_task)
-        if self.assigned_meeting_seat and self._directive_is_meeting():
-            data["movement_type"] = "meeting"
-            data["target_id"] = self.assigned_meeting_seat
-        travel_mode = self._resolve_tool_target(data, targets, wants_break, agents)
-        if travel_mode == "normal":
-            travel_mode = self._route_to_collaborator(data, targets, agents)
-        target_id = data.get("target_id")
-        if target_id not in targets.all_targets():
-            work_targets = llm_work_targets(self, targets)
-            target_id = targets.own_desk(self.worker_id) or (work_targets[0] if work_targets else None)
-            if target_id is None:
-                return None
-            data["target_id"] = target_id
-        if target_id in targets.idle_points and not wants_break:
-            work_targets = llm_work_targets(self, targets)
-            target_id = targets.own_desk(self.worker_id) or (work_targets[0] if work_targets else target_id)
-            data["target_id"] = target_id
-        travel_mode = enforce_fixed_workstation_target(self, data, targets, travel_mode)
-        target_id = data.get("target_id")
-
-        self.status = str(data.get("status", self.status))[:30]
-        self.mood = str(data.get("mood", self.mood))[:20]
-        self.focus_task = str(data.get("focus_task", self.focus_task))[:60]
-        self._apply_work_context(data, company)
-        self.remember(f"LLM决策:{target_id}:{self.status}")
-        return self._move_command(str(target_id), str(data.get("say", ""))[:60], data, travel_mode)
-
-    def _decide_with_rules(self, targets: OfficeTargets, company: CompanyProject) -> AgentCommand:
-        behavior = choose_rule_behavior(self, targets, company)
-        if behavior is None or not behavior.target_id:
-            return self._idle_command("暂时没有合适目标。")
-
-        target_id = behavior.target_id
-        self.status = status_for_behavior_state(behavior.state, bool(self.current_directive or behavior.active_task))
-        self.mood = self._mood_for_state()
-        if behavior.state == STATE_BREAK:
-            self.energy = min(1.0, self.energy + 0.08)
-            self.stress = max(0.05, self.stress - 0.08)
-        context = build_rule_work_context(self, target_id, behavior.active_task)
-        context["behavior_state"] = behavior.state
-        self._apply_work_context(context, company)
-        self.remember(f"规则决策:{target_id}:{self.focus_task}")
-        return self._move_command(target_id, str(context["say"]), context, behavior.travel_mode)
-
-    def _should_take_break(self) -> bool:
-        if self.energy <= settings.low_energy_rest_threshold:
-            return True
-        if self.stress >= settings.high_stress_rest_threshold:
-            return True
-        return random.random() < settings.break_chance
 
     def _directive_is_meeting(self) -> bool:
         meeting_words = ["讨论", "开会", "会议", "评审", "对齐", "同步", "复盘", "碰一下"]
@@ -228,168 +273,6 @@ class OfficeAgent:
             self.remember(f"需要协作:{self.needs_help_from}")
         if self.confirmation_question:
             self.remember(f"待确认:{self.confirmation_question}")
-
-    def _resolve_tool_target(self, data: dict[str, object], targets: OfficeTargets, wants_break: bool, agents: dict[str, "OfficeAgent"]) -> str:
-        movement_type = text_value(data.get("movement_type", "")).strip()
-        colleague_id = text_value(data.get("colleague_id", "")).strip()
-        if not colleague_id:
-            colleague_id = text_value(data.get("needs_help_from", "")).strip()
-        colleague_id = normalize_colleague_id(colleague_id, self.worker_id, agents)
-
-        if movement_type == "visit_colleague" and colleague_id and colleague_id != self.worker_id:
-            helper_desk = targets.own_desk(colleague_id)
-            if helper_desk:
-                data["target_id"] = helper_desk
-                data["needs_help_from"] = colleague_id
-                self.seeking_helper_id = colleague_id
-                self.checked_helper_desk = False
-                return "visit"
-
-        if movement_type == "meeting":
-            if self.assigned_meeting_seat:
-                data["target_id"] = self.assigned_meeting_seat
-                return "normal"
-
-        if movement_type == "break" and wants_break and targets.idle_points:
-            data["target_id"] = random.choice(targets.idle_points)
-            return "normal"
-
-        own_desk = targets.own_desk(self.worker_id)
-        if movement_type in ["own_desk", "stay", "break", ""] and own_desk:
-            data["target_id"] = own_desk
-            return "normal"
-
-        if own_desk:
-            data["target_id"] = own_desk
-        return "normal"
-
-    def _route_to_collaborator(self, data: dict[str, object], targets: OfficeTargets, agents: dict[str, "OfficeAgent"]) -> str:
-        """需要和同事沟通时，先去对方工位找人，不直接抢座位。"""
-        helper_id = normalize_colleague_id(text_value(data.get("needs_help_from", "")).strip(), self.worker_id, agents)
-        if not helper_id or helper_id == self.worker_id:
-            return "normal"
-        helper_desk = targets.own_desk(helper_id)
-        if helper_desk:
-            data["target_id"] = helper_desk
-            self.seeking_helper_id = helper_id
-            self.checked_helper_desk = False
-            intent = text_value(data.get("intent", ""))
-            if "找" not in intent and "沟通" not in intent:
-                data["intent"] = f"{intent}；先去找 {helper_id} 当面同步。".strip("；")
-            return "visit"
-        return "normal"
-
-    async def _continue_find_person_flow(self, event: WorkerEvent, targets: OfficeTargets, agents: dict[str, "OfficeAgent"]) -> AgentCommand | None:
-        if not self.seeking_helper_id or event.type != "worker_arrived":
-            return None
-
-        helper = agents.get(self.seeking_helper_id)
-        helper_desk = targets.own_desk(self.seeking_helper_id)
-        if helper is None or helper_desk is None:
-            self.seeking_helper_id = ""
-            self.checked_helper_desk = False
-            return None
-
-        arrived_target = event.target_id or ""
-        helper_last_target = helper.last_target_id or helper_desk
-        helper_is_at_desk = helper_last_target == helper_desk
-
-        if arrived_target == helper_desk and not helper_is_at_desk and not self.checked_helper_desk:
-            self.checked_helper_desk = True
-            target_id = helper_last_target if helper_last_target in targets.all_targets() else helper_desk
-            context = {
-                "intent": f"{helper.name} 不在工位，改去他当前所在位置找人",
-                "work_update": f"去 {target_id} 找 {helper.name} 当面沟通",
-                "risk_note": "",
-                "needs_help_from": self.seeking_helper_id,
-                "confirmation_question": "",
-                "memory_note": f"{helper.name} 工位没人，转去 {target_id} 找他",
-                "confidence": 0.86,
-                "stream_lines": [
-                    f"{helper.name} 工位没人。",
-                    f"我去他现在所在的位置找他。",
-                ],
-            }
-            memory_note = text_value(context.get("memory_note", "")).strip()
-            if memory_note:
-                self.remember(f"工作记忆:{memory_note}")
-            return self._move_command(target_id, f"{helper.name} 不在工位，我去他那边找。", context, "visit")
-
-        if arrived_target == helper_last_target or (arrived_target == helper_desk and helper_is_at_desk):
-            context = await self._collaboration_context(helper)
-            self.seeking_helper_id = ""
-            self.checked_helper_desk = False
-            self.needs_help_from = ""
-            self.status = f"和{helper.name}沟通"
-            helper.status = f"回应{self.name}的协作"
-            helper.pending_interaction_from = self.worker_id
-            helper.pending_interaction_say = text_value(context.get("helper_say", ""))
-            helper.pending_interaction_context = dict(context)
-            helper.remember(f"协作回应:{self.name}:{text_value(context.get('confirmation_question', '')) or text_value(context.get('work_update', ''))}")
-            self.remember(f"协作沟通:{helper.name}:{text_value(context.get('work_update', ''))}")
-            return self._say_command(text_value(context.get("say", "")), context)
-        return None
-
-    async def _collaboration_context(self, helper: "OfficeAgent") -> dict[str, object]:
-        question = self.confirmation_question or f"{helper.name}，我需要你帮我确认一下「{self.focus_task}」这块。"
-        try:
-            data = await llm_client.complete_colleague_reply(
-                requester_name=self.name,
-                requester_role=self.role,
-                helper_name=helper.name,
-                helper_role=helper.role,
-                helper_prompt=helper.roleplay_prompt(),
-                question=question,
-                task_title=self.focus_task,
-                risk_note=self.current_risk,
-            )
-        except Exception:
-            data = {}
-        if data.get("reply") and data.get("work_update"):
-            reply = clean_visible_text(data.get("reply", ""))
-            next_step = clean_visible_text(data.get("next_step", "")) or clean_visible_text(data.get("work_update", ""))
-            return {
-                "intent": f"当面找 {helper.name} 处理协作问题",
-                "work_update": clean_visible_text(data.get("work_update", "")),
-                "risk_note": clean_visible_text(data.get("risk_note", "")) or self.current_risk,
-                "needs_help_from": "",
-                "confirmation_question": question,
-                "confidence": safe_confidence(data.get("confidence", 0.0)),
-                "behavior_state": "collaboration_loop",
-                "stream_lines": [
-                    f"已找到 {helper.name}。",
-                    f"{helper.name}回应：{reply}",
-                    next_step,
-                ],
-                "say": f"{self.name}：明白，我按这个去推进。",
-                "helper_say": f"{helper.name}：{reply}",
-            }
-
-        if "测试" in helper.role:
-            update = f"请 {helper.name} 补验收点和回归风险"
-        elif "产品" in helper.role:
-            update = f"请 {helper.name} 明确用户场景和验收口径"
-        elif "后端" in helper.role or "架构" in helper.role:
-            update = f"请 {helper.name} 确认接口边界和技术风险"
-        elif "前端" in helper.role or "UI" in helper.role:
-            update = f"请 {helper.name} 确认页面状态和交互细节"
-        else:
-            update = f"请 {helper.name} 补充他负责范围的结论"
-        return {
-            "intent": f"当面找 {helper.name} 处理协作问题",
-            "work_update": update,
-            "risk_note": self.current_risk,
-            "needs_help_from": "",
-            "confirmation_question": question,
-            "confidence": 0.84,
-            "behavior_state": "collaboration_loop",
-            "stream_lines": [
-                f"已找到 {helper.name}。",
-                update,
-            ],
-            "say": f"{self.name}：{question}",
-            "helper_say": f"{helper.name}：我先看这块，{update}。",
-        }
 
     def roleplay_prompt(self) -> str:
         """每个员工独立的角色扮演提示词，用于 LLM 决策和悬停详情展示。"""
@@ -449,6 +332,7 @@ class OfficeAgent:
             self.mood = "有成就感"
             self.current_directive = ""
             self.active_task_id = ""
+            self.fsm.transition(WorkerState.IDLE)
 
     def _react_to_current_place(self, event: WorkerEvent, targets: OfficeTargets, company: CompanyProject) -> AgentCommand | None:
         """到达后的反应层：先在当前位置工作/休息，不立刻乱发新移动。"""
@@ -458,6 +342,7 @@ class OfficeAgent:
         active_task = company.tasks.get(self.active_task_id)
         own_desk = targets.own_desk(self.worker_id)
         if active_task and own_desk and self.last_target_id == own_desk:
+            self.fsm.transition(WorkerState.WORKING)
             self.status = "在工位推进任务"
             self.focus_task = active_task.title
             context = {
@@ -473,9 +358,10 @@ class OfficeAgent:
                     f"当前进度约 {active_task.progress:.0%}",
                 ],
             }
-            return self._idle_command("", context)
+            return self.idle_command("", context)
 
         if self.last_target_id in targets.idle_points and (self.energy < 0.95 or self.stress > 0.12):
+            self.fsm.transition(WorkerState.RESTING)
             self.energy = min(1.0, self.energy + 0.06)
             self.stress = max(0.05, self.stress - 0.05)
             self.status = "短暂休息"
@@ -489,24 +375,17 @@ class OfficeAgent:
                 "behavior_state": "break_loop",
                 "stream_lines": ["先缓一下，恢复状态。"],
             }
-            return self._idle_command("", context)
+            return self.idle_command("", context)
         return None
 
-    def _move_command(self, target_id: str, say: str, context: dict[str, object] | None = None, travel_mode: str = "normal") -> AgentCommand:
+    def move_command(self, target_id: str, say: str, context: dict[str, object] | None = None, travel_mode: str = "normal") -> AgentCommand:
         payload = self.snapshot().model_dump()
         payload["travel_mode"] = travel_mode
         if context:
             payload["behavior_state"] = text_value(context.get("behavior_state", ""))
             if text_value(context.get("behavior_state", "")).endswith("_loop"):
                 payload["decision_source"] = "reaction_loop"
-            payload["work_context"] = {
-                "intent": str(context.get("intent", "")),
-                "work_update": text_value(context.get("work_update", "")),
-                "risk_note": text_value(context.get("risk_note", "")),
-                "needs_help_from": text_value(context.get("needs_help_from", "")),
-                "confirmation_question": text_value(context.get("confirmation_question", "")),
-                "confidence": safe_confidence(context.get("confidence", 0.0)),
-            }
+            payload["work_context"] = self._work_context_payload(context)
             payload["agent_stream"] = agent_stream_lines(context, say)
         visible_say = "" if travel_mode == "meeting" or "Chair" in target_id else say
         return AgentCommand(
@@ -517,20 +396,13 @@ class OfficeAgent:
             payload=payload,
         )
 
-    def _idle_command(self, say: str, context: dict[str, object] | None = None) -> AgentCommand:
+    def idle_command(self, say: str, context: dict[str, object] | None = None) -> AgentCommand:
         payload = self.snapshot().model_dump()
         if context:
             payload["behavior_state"] = text_value(context.get("behavior_state", ""))
             if text_value(context.get("behavior_state", "")).endswith("_loop"):
                 payload["decision_source"] = "reaction_loop"
-            payload["work_context"] = {
-                "intent": str(context.get("intent", "")),
-                "work_update": text_value(context.get("work_update", "")),
-                "risk_note": text_value(context.get("risk_note", "")),
-                "needs_help_from": text_value(context.get("needs_help_from", "")),
-                "confirmation_question": text_value(context.get("confirmation_question", "")),
-                "confidence": safe_confidence(context.get("confidence", 0.0)),
-            }
+            payload["work_context"] = self._work_context_payload(context)
             payload["agent_stream"] = agent_stream_lines(context, say)
         return AgentCommand(
             worker_id=self.worker_id,
@@ -539,34 +411,13 @@ class OfficeAgent:
             payload=payload,
         )
 
-    def _consume_pending_interaction(self) -> AgentCommand | None:
-        if not self.pending_interaction_say:
-            return None
-        say = self.pending_interaction_say
-        context = dict(self.pending_interaction_context)
-        context["behavior_state"] = "collaboration_reply_loop"
-        requester_id = self.pending_interaction_from
-        self.pending_interaction_from = ""
-        self.pending_interaction_say = ""
-        self.pending_interaction_context = {}
-        self.status = "回应同事协作"
-        self.remember(f"协作发言:{requester_id}:{say}")
-        return self._say_command(say, context)
-
-    def _say_command(self, say: str, context: dict[str, object] | None = None) -> AgentCommand:
+    def say_command(self, say: str, context: dict[str, object] | None = None) -> AgentCommand:
         payload = self.snapshot().model_dump()
         payload["display"] = "speech"
         if context:
             payload["behavior_state"] = text_value(context.get("behavior_state", ""))
             payload["decision_source"] = "reaction_loop"
-            payload["work_context"] = {
-                "intent": str(context.get("intent", "")),
-                "work_update": text_value(context.get("work_update", "")),
-                "risk_note": text_value(context.get("risk_note", "")),
-                "needs_help_from": text_value(context.get("needs_help_from", "")),
-                "confirmation_question": text_value(context.get("confirmation_question", "")),
-                "confidence": safe_confidence(context.get("confidence", 0.0)),
-            }
+            payload["work_context"] = self._work_context_payload(context)
             payload["agent_stream"] = agent_stream_lines(context, say)
         return AgentCommand(
             worker_id=self.worker_id,
@@ -574,6 +425,16 @@ class OfficeAgent:
             say=say,
             payload=payload,
         )
+
+    def _work_context_payload(self, context: dict[str, object]) -> dict[str, object]:
+        return {
+            "intent": str(context.get("intent", "")),
+            "work_update": text_value(context.get("work_update", "")),
+            "risk_note": text_value(context.get("risk_note", "")),
+            "needs_help_from": text_value(context.get("needs_help_from", "")),
+            "confirmation_question": text_value(context.get("confirmation_question", "")),
+            "confidence": safe_confidence(context.get("confidence", 0.0)),
+        }
 
     def snapshot(self) -> AgentSnapshot:
         return AgentSnapshot(
@@ -600,8 +461,3 @@ class OfficeAgent:
             confirmation_question=self.confirmation_question,
             memory=memory_store.display_memory(self.worker_id, 8),
         )
-
-
-
-
-

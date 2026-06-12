@@ -9,6 +9,7 @@ from app.planning_service import ProjectPlanningService
 from app.schemas import AgentCommand, WorkerEvent
 from app.worker_agent import OfficeAgent
 from app.worker_llm_decision import clean_visible_text
+from app.worker_state import WorkerState
 
 
 class MeetingRuntime:
@@ -201,6 +202,7 @@ class MeetingRuntime:
             if task:
                 agent.apply_directive(directive, task)
             agent.assigned_meeting_seat = ""
+            agent.fsm.force(WorkerState.WORKING)
             agent.status = "会议结束，回工位开工"
             agent.mood = "明确下一步"
             desk_id = self.targets.own_desk(worker_id)
@@ -355,6 +357,7 @@ class MeetingRuntime:
         for index, worker_id in enumerate(worker_ids[:8]):
             if worker_id in self.agents and index < len(ordered_seats):
                 self.agents[worker_id].assigned_meeting_seat = ordered_seats[index]
+                self.agents[worker_id].fsm.force(WorkerState.MEETING)
     
     
     

@@ -8,7 +8,7 @@ from app.llm_client import llm_client
 
 
 def verify_tool_contracts() -> None:
-    decision_tool = llm_client._agent_decision_tool(["worker1Marker"])
+    decision_tool = llm_client._agent_decision_tool()
     decision_function = decision_tool["function"]
     assert decision_function["name"] == "office_agent_decision"
     assert decision_function["parameters"]["properties"]["movement_type"]["enum"] == [
@@ -18,7 +18,9 @@ def verify_tool_contracts() -> None:
         "break",
         "stay",
     ]
-    assert "target_id" in decision_function["parameters"]["properties"]
+    # LLM 只产出意图，具体坐标由后端 resolve_decision 解析
+    assert "target_id" not in decision_function["parameters"]["properties"]
+    assert "colleague_id" in decision_function["parameters"]["properties"]
 
     meeting_tool = llm_client._meeting_reply_tool()
     meeting_function = meeting_tool["function"]
