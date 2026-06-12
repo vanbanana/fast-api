@@ -69,7 +69,9 @@ async def continue_find_person_flow(
         )
         helper.remember(f"协作回应:{agent.name}:{text_value(context.get('confirmation_question', '')) or text_value(context.get('work_update', ''))}")
         agent.remember(f"协作沟通:{helper.name}:{text_value(context.get('work_update', ''))}")
-        return agent.say_command(text_value(context.get("say", "")), context)
+        command = agent.say_command(text_value(context.get("say", "")), context)
+        agent.finish_errand()
+        return command
 
     # 追了一轮还没遇上（对方持续移动），放弃追逐回到正常决策，避免无限绕圈
     if fsm.checked_helper_desk:
@@ -77,6 +79,7 @@ async def continue_find_person_flow(
         fsm.transition(WorkerState.IDLE)
         agent.needs_help_from = ""
         agent.remember(f"工作记忆:没遇到 {helper_name}，先回去推进自己的部分")
+        agent.finish_errand()
         return None
     return None
 

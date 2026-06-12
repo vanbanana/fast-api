@@ -9,7 +9,7 @@ signal decision_requested()
 @export var arrive_distance: float = 3.0
 @export var min_wait_time: float = 1.2
 @export var max_wait_time: float = 3.0
-@export var use_avoidance: bool = false
+@export var use_avoidance: bool = true
 @export var repath_when_stuck_time: float = 1.2
 
 @export_category("角色资源")
@@ -65,6 +65,7 @@ func _ready() -> void:
 	navigation_agent.path_desired_distance = arrive_distance
 	navigation_agent.avoidance_enabled = use_avoidance
 	if use_avoidance:
+		navigation_agent.radius = 5.0
 		navigation_agent.velocity_computed.connect(_on_velocity_computed)
 	wait_timer.timeout.connect(_on_wait_timer_timeout)
 
@@ -207,8 +208,12 @@ func set_external_decision_enabled(enabled: bool) -> void:
 
 
 func wait_for_next_decision() -> void:
-	# 后端返回 idle 时使用，避免员工卡住不再进入自主循环。
-	_play_idle()
+	# 后端返回 idle/say 时使用，避免员工卡住不再进入自主循环。
+	# 已经坐在座位上时保持入座动画，否则会出现"坐着却播放站立动画"的视觉 bug。
+	if current_target == null and reserved_seat != null:
+		_play_seat_animation(reserved_seat)
+	else:
+		_play_idle()
 	wait_timer.start(rng.randf_range(min_wait_time, max_wait_time))
 
 

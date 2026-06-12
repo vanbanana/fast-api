@@ -63,6 +63,8 @@ class ProjectTask:
     assignee_id: str | None = None
     progress: float = 0.0
     notes: list[str] = field(default_factory=list)
+    review_state: str = ""
+    rework_count: int = 0
 
     def assign_to(self, worker_id: str) -> None:
         self.assignee_id = worker_id
@@ -70,7 +72,7 @@ class ProjectTask:
             self.status = "doing"
 
     def advance(self, amount: float, note: str) -> bool:
-        if self.status == "done":
+        if self.status in ("done", "review"):
             return False
 
         self.status = "doing"
@@ -78,9 +80,31 @@ class ProjectTask:
         self.notes.append(note)
         self.notes = self.notes[-8:]
         if self.progress >= 1.0:
+            if self.needs_review():
+                self.status = "review"
+                self.review_state = "pending"
+                return False
             self.status = "done"
             return True
         return False
+
+    def needs_review(self) -> bool:
+        """开发类任务完成后要提测，由测试验收后才算真正完成。"""
+        return self.task_type in ("backend", "frontend", "design", "general") and self.review_state == ""
+
+    def fail_review(self, note: str) -> None:
+        self.status = "doing"
+        self.progress = min(self.progress, 0.72)
+        self.rework_count += 1
+        self.review_state = ""
+        self.notes.append(note)
+        self.notes = self.notes[-8:]
+
+    def pass_review(self, note: str) -> None:
+        self.status = "done"
+        self.review_state = "passed"
+        self.notes.append(note)
+        self.notes = self.notes[-8:]
 
     def snapshot(self) -> ProjectTaskSnapshot:
         return ProjectTaskSnapshot(
@@ -136,9 +160,14 @@ class CompanyProject:
 
     def task_for_agent(self, worker_id: str) -> ProjectTask | None:
         for task in self.tasks.values():
-            if task.assignee_id == worker_id and task.status != "done":
+            if task.assignee_id == worker_id and task.status not in ("done", "review"):
                 return task
         return None
+
+    def next_review_task(self) -> ProjectTask | None:
+        candidates = [task for task in self.tasks.values() if task.status == "review"]
+        candidates.sort(key=lambda item: (-item.priority, item.task_id))
+        return candidates[0] if candidates else None
 
     def best_unassigned_task_for_role(self, role: str) -> ProjectTask | None:
         role_keywords = {

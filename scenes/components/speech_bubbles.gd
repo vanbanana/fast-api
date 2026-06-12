@@ -177,7 +177,25 @@ func set_status(worker_id: String, text: String) -> void:
 		status_panel.visible = false
 		return
 	status_label.text = text.substr(0, 14)
+	status_panel.self_modulate = _color_for_status(text)
 	status_panel.visible = true
+
+
+func _color_for_status(text: String) -> Color:
+	# 状态小气泡按类别着色，一眼区分工作/休息/沟通/会议/空闲。
+	for keyword in ["休息", "缓"]:
+		if text.contains(keyword):
+			return Color(1.0, 0.78, 0.45)
+	for keyword in ["会议", "开会", "发言"]:
+		if text.contains(keyword):
+			return Color(0.78, 0.62, 1.0)
+	for keyword in ["沟通", "回应", "聊", "协作", "找"]:
+		if text.contains(keyword):
+			return Color(0.55, 0.80, 1.0)
+	for keyword in ["推进", "任务", "执行", "提测", "验收", "工位", "指派"]:
+		if text.contains(keyword):
+			return Color(0.62, 1.0, 0.66)
+	return Color(0.85, 0.85, 0.85)
 
 
 func _scroll_to_bottom(worker_id: String) -> void:

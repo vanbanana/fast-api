@@ -67,6 +67,9 @@ class OfficeAgent:
     confirmation_question: str = ""
     assigned_meeting_seat: str = ""
     dwell_ticks: int = 0
+    errand_helper_id: str = ""
+    interrupted_task_id: str = ""
+    interrupted_focus_task: str = ""
     fsm: WorkerStateMachine = field(default_factory=WorkerStateMachine)
     memory: list[str] = field(default_factory=list)
 
@@ -94,6 +97,9 @@ class OfficeAgent:
         self.confirmation_question = ""
         self.assigned_meeting_seat = ""
         self.dwell_ticks = 0
+        self.errand_helper_id = ""
+        self.interrupted_task_id = ""
+        self.interrupted_focus_task = ""
         self.fsm.reset()
 
     def apply_directive(self, directive: BossDirective, task: ProjectTask | None = None) -> None:
@@ -110,6 +116,41 @@ class OfficeAgent:
         self.cooldown_steps = 0
         self.remember(f"老板指令:{directive.text}")
 
+    def interrupt_for_errand(self, directive: BossDirective, helper_id: str) -> None:
+        """老板指派优先级高于当前工作：暂存手头任务，立刻去找指定同事，办完自动恢复。"""
+        if self.active_task_id:
+            self.interrupted_task_id = self.active_task_id
+            self.interrupted_focus_task = self.focus_task
+        self.errand_helper_id = helper_id
+        self.current_directive = directive.text
+        self.focus_task = directive.text
+        self.confirmation_question = directive.text[:100]
+        self.active_task_id = ""
+        self.status = "执行老板指派"
+        self.mood = "被点名"
+        self.autonomy_steps = 0
+        self.cooldown_steps = 0
+        self.dwell_ticks = 0
+        self.fsm.force(WorkerState.IDLE)
+        self.fsm.start_seeking(helper_id)
+        self.needs_help_from = helper_id
+        self.remember(f"老板指派:{directive.text}")
+
+    def finish_errand(self) -> None:
+        """指派办完：恢复被打断的任务，不影响原有工作节奏。"""
+        if not self.errand_helper_id:
+            return
+        self.errand_helper_id = ""
+        self.current_directive = ""
+        self.confirmation_question = ""
+        if self.interrupted_task_id:
+            self.active_task_id = self.interrupted_task_id
+            self.focus_task = self.interrupted_focus_task or self.focus_task
+            self.status = "回到原任务"
+            self.remember(f"办完老板指派，回到原任务:{self.focus_task}")
+        self.interrupted_task_id = ""
+        self.interrupted_focus_task = ""
+
     async def decide(self, event: WorkerEvent, targets: OfficeTargets, company: CompanyProject, agents: dict[str, "OfficeAgent"] | None = None) -> AgentCommand:
         agents = agents or {}
         self._record_event(event)
@@ -123,7 +164,12 @@ class OfficeAgent:
         if chat_command:
             return chat_command
         self._sync_task_focus(company)
-        self._advance_work_if_possible(event, targets, company)
+        submit_command = self._advance_work_if_possible(event, targets, company)
+        if submit_command:
+            return submit_command
+        review_command = self._review_tasks_if_qa(event, targets, company, agents)
+        if review_command:
+            return review_command
         reaction_command = self._react_to_current_place(event, targets, company)
         if reaction_command:
             return reaction_command
@@ -328,6 +374,8 @@ class OfficeAgent:
         )
 
     def _sync_task_focus(self, company: CompanyProject) -> None:
+        if self.errand_helper_id:
+            return
         active_task = company.tasks.get(self.active_task_id)
         if active_task and active_task.status == "done":
             active_task = None
@@ -349,20 +397,44 @@ class OfficeAgent:
             if active_task.status == "doing":
                 self.status = "推进任务"
 
-    def _advance_work_if_possible(self, event: WorkerEvent, targets: OfficeTargets, company: CompanyProject) -> None:
+    def _advance_work_if_possible(self, event: WorkerEvent, targets: OfficeTargets, company: CompanyProject) -> AgentCommand | None:
         if not self.active_task_id:
-            return
+            return None
 
         own_desk = targets.own_desk(self.worker_id)
         at_own_desk = event.target_id == own_desk and event.type == "worker_arrived"
         active_tick = event.type in ["autonomy_tick", "worker_ready"] and self.last_target_id == own_desk
         if not at_own_desk and not active_tick:
-            return
+            return None
 
+        task = company.tasks.get(self.active_task_id)
         amount = random.uniform(0.06, 0.16) * max(0.35, self.energy) * max(0.4, 1.0 - self.stress * 0.35)
         completed = company.advance_task(self.active_task_id, self.name, amount)
         self.energy = max(0.08, self.energy - 0.035)
         self.stress = min(1.0, self.stress + 0.02)
+        if task and task.status == "review":
+            submitted_task_id = self.active_task_id
+            self.remember(f"提测任务:{submitted_task_id}:{task.title}")
+            self.status = "已提测，等验收"
+            self.current_directive = ""
+            self.active_task_id = ""
+            self.fsm.transition(WorkerState.IDLE)
+            say = random.choice([
+                f"「{task.title[:18]}」这块我提测了，等验收。",
+                "这块我做完了，丢给测试看看。",
+                "提测了，有问题随时叫我。",
+            ])
+            context = {
+                "intent": f"完成开发，提测「{task.title[:30]}」",
+                "work_update": f"任务 {submitted_task_id} 进入验收阶段",
+                "risk_note": "",
+                "needs_help_from": "",
+                "confirmation_question": "",
+                "confidence": 0.85,
+                "behavior_state": "submit_review_loop",
+                "stream_lines": [f"提测：{task.title}", "等测试验收。"],
+            }
+            return self.say_command(say, context)
         if completed:
             self.completed_task_count += 1
             self.remember(f"完成任务:{self.active_task_id}")
@@ -371,6 +443,61 @@ class OfficeAgent:
             self.current_directive = ""
             self.active_task_id = ""
             self.fsm.transition(WorkerState.IDLE)
+        return None
+
+    def _review_tasks_if_qa(self, event: WorkerEvent, targets: OfficeTargets, company: CompanyProject, agents: dict[str, "OfficeAgent"]) -> AgentCommand | None:
+        """测试验收循环：提测任务由测试在工位验收，通过则完成，不通过打回给原开发。"""
+        if "测试" not in self.role:
+            return None
+        if event.type not in ["autonomy_tick", "worker_ready", "worker_arrived"]:
+            return None
+        own_desk = targets.own_desk(self.worker_id)
+        if not own_desk or self.last_target_id != own_desk:
+            return None
+        task = company.next_review_task()
+        if task is None:
+            return None
+        dev = agents.get(task.assignee_id or "")
+        dev_name = dev.name if dev else "开发"
+        pass_chance = 0.6 if task.rework_count == 0 else 0.85
+        if random.random() < pass_chance:
+            task.pass_review(f"{self.name} 验收通过")
+            say = random.choice([
+                f"「{task.title[:18]}」我过了一遍，没什么问题，算完成了。",
+                f"{dev_name}那块验收通过了，没问题。",
+                "这轮验收跑完了，可以合入。",
+            ])
+            if dev:
+                dev.completed_task_count += 1
+                dev.mood = "有成就感"
+                dev.stress = max(0.05, dev.stress - 0.05)
+                dev.remember(f"验收通过:{task.task_id}:{task.title}")
+            result_line = "验收通过，任务完成。"
+        else:
+            task.fail_review(f"{self.name} 验收打回")
+            say = random.choice([
+                f"{dev_name}，「{task.title[:18]}」有个边界没处理，打回你再看看。",
+                f"{dev_name}，这块有个场景跑不过，麻烦再修一下。",
+                f"不行，异常分支有问题，还得回给{dev_name}改。",
+            ])
+            if dev:
+                dev.stress = min(1.0, dev.stress + 0.06)
+                dev.mood = "有点烦"
+                dev.remember(f"被打回:{task.task_id}:{task.title}")
+            result_line = f"打回给 {dev_name} 返工。"
+        self.status = "验收任务"
+        self.remember(f"验收:{task.task_id}:{result_line}")
+        context = {
+            "intent": f"验收提测任务「{task.title[:30]}」",
+            "work_update": result_line,
+            "risk_note": "",
+            "needs_help_from": "",
+            "confirmation_question": "",
+            "confidence": 0.8,
+            "behavior_state": "qa_review_loop",
+            "stream_lines": [f"验收：{task.title}", result_line],
+        }
+        return self.say_command(say, context)
 
     def _react_to_current_place(self, event: WorkerEvent, targets: OfficeTargets, company: CompanyProject) -> AgentCommand | None:
         """到达后的反应层：先在当前位置工作/休息，不立刻乱发新移动。"""

@@ -7,7 +7,7 @@ const BackendClient := preload("res://scenes/components/backend_client.gd")
 const SpeechBubbles := preload("res://scenes/components/speech_bubbles.gd")
 const DetailPanel := preload("res://scenes/components/detail_panel.gd")
 const DebugPanel := preload("res://scenes/components/debug_panel.gd")
-const BossCommandUi := preload("res://scenes/components/boss_command_ui.gd")
+const PhoneUi := preload("res://scenes/components/phone_ui.gd")
 const AgentStateStore := preload("res://scenes/components/agent_state_store.gd")
 const TokenBar := preload("res://scenes/components/token_bar.gd")
 
@@ -35,7 +35,7 @@ var backend: BackendClient
 var speech_bubbles: SpeechBubbles
 var detail_panel: DetailPanel
 var debug_panel: DebugPanel
-var boss_ui: BossCommandUi
+var phone_ui: PhoneUi
 var token_bar: TokenBar
 var agent_store := AgentStateStore.new()
 
@@ -70,11 +70,11 @@ func _ready() -> void:
 			worker.decision_requested.connect(_on_worker_decision_requested.bind(worker))
 
 	if boss_ui_enabled:
-		boss_ui = BossCommandUi.new()
-		boss_ui.name = "BossCommandUi"
-		add_child(boss_ui)
-		boss_ui.setup(pixel_ui_theme)
-		boss_ui.command_submitted.connect(send_boss_command)
+		phone_ui = PhoneUi.new()
+		phone_ui.name = "PhoneUi"
+		add_child(phone_ui)
+		phone_ui.setup(pixel_ui_theme, local_worker_profiles)
+		phone_ui.command_submitted.connect(send_boss_command)
 
 	if hover_detail_enabled:
 		detail_panel = DetailPanel.new()
@@ -346,21 +346,26 @@ func _apply_idle_command(command: Dictionary) -> void:
 func _apply_say_command(command: Dictionary) -> void:
 	var worker_id := str(command.get("worker_id", ""))
 	var say := str(command.get("say", ""))
-	if worker_id.is_empty() or say.is_empty():
+	if worker_id.is_empty():
 		return
 
 	var payload_value: Variant = command.get("payload", {})
-	if !(payload_value is Dictionary):
-		return
+	var payload: Dictionary = payload_value if payload_value is Dictionary else {}
+	if !say.is_empty() and str(payload.get("display", "")) == "speech":
+		_show_speech(worker_id, say)
 
-	var payload := payload_value as Dictionary
-	if str(payload.get("display", "")) != "speech":
-		return
-
-	_show_speech(worker_id, say)
 	var session_id := str(payload.get("meeting_session_id", ""))
 	if !session_id.is_empty():
 		_schedule_meeting_say_done(worker_id, session_id, maxf(1.2, float(say.length()) / 8.0))
+		return
+	# say 不会触发移动/到达，必须手动重启该员工的决策计时器，否则循环死掉。
+	_resume_worker_decision(worker_id)
+
+
+func _resume_worker_decision(worker_id: String) -> void:
+	var worker := worker_nodes.get(worker_id) as Node
+	if worker != null and worker.has_method(&"wait_for_next_decision"):
+		worker.wait_for_next_decision()
 
 
 func _schedule_meeting_say_done(worker_id: String, session_id: String, seconds: float) -> void:
@@ -395,6 +400,9 @@ func _on_meeting_say_done_timeout(worker_id: String, session_id: String, key: St
 func _show_speech(worker_id: String, text: String) -> void:
 	if speech_bubbles != null:
 		speech_bubbles.show_speech(worker_id, text)
+	if phone_ui != null:
+		var profile: Dictionary = local_worker_profiles.get(worker_id, {})
+		phone_ui.add_chat_message(str(profile.get("name", worker_id)), text, false)
 
 
 func _update_status_bubble(worker_id: String) -> void:
@@ -411,8 +419,8 @@ func _clear_all_speech_bubbles() -> void:
 
 
 func _set_status(text: String) -> void:
-	if boss_ui != null:
-		boss_ui.set_status(text)
+	if phone_ui != null:
+		phone_ui.set_status(text)
 
 
 func _debug_status_line() -> String:
@@ -420,8 +428,8 @@ func _debug_status_line() -> String:
 	if backend != null:
 		socket_state = backend.socket_state_name()
 	var status := ""
-	if boss_ui != null:
-		status = boss_ui.status_text()
+	if phone_ui != null:
+		status = phone_ui.status_text()
 	return "backend_connected=%s  socket=%s  url=%s\nstatus=%s" % [
 		str(_backend_connected()), socket_state, backend_url, status,
 	]

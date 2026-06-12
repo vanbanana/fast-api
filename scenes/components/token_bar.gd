@@ -1,5 +1,5 @@
 extends Node
-## 顶部居中 token 消耗条：展示后端累计的 LLM token 用量（来自官方 usage 字段）。
+## 底部居中 token 消耗条：展示后端累计的 LLM token 用量（来自官方 usage 字段）。
 
 const PixelStyles := preload("res://scenes/components/pixel_styles.gd")
 
@@ -19,14 +19,14 @@ func setup(ui_theme: PixelUiTheme) -> void:
 
 	var panel := PanelContainer.new()
 	panel.name = "TokenBarPanel"
-	panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
 	panel.custom_minimum_size = theme.token_bar_size
 	panel.offset_left = -theme.token_bar_size.x / 2.0
 	panel.offset_right = theme.token_bar_size.x / 2.0
-	panel.offset_top = theme.token_bar_margin_top
-	panel.offset_bottom = theme.token_bar_margin_top + theme.token_bar_size.y
+	panel.offset_bottom = -theme.token_bar_margin_bottom
+	panel.offset_top = -theme.token_bar_margin_bottom - theme.token_bar_size.y
 	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	panel.grow_vertical = Control.GROW_DIRECTION_END
+	panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_styles.apply_panel_style(panel)
 	layer.add_child(panel)
 

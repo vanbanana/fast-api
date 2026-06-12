@@ -9,7 +9,7 @@ extends Resource
 @export var boss_panel_size: Vector2 = Vector2(360, 76)
 @export var boss_panel_margin_bottom: float = 10.0
 @export var token_bar_size: Vector2 = Vector2(300, 22)
-@export var token_bar_margin_top: float = 8.0
+@export var token_bar_margin_bottom: float = 8.0
 @export var detail_panel_size: Vector2 = Vector2(330, 210)
 @export var detail_panel_offset: Vector2 = Vector2(14, 14)
 @export var speech_bubble_offset: Vector2 = Vector2(-46, -46)

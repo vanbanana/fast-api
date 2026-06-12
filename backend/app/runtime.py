@@ -1,4 +1,6 @@
-﻿from app.domain import BossDirective, CompanyProject, OfficeTargets
+﻿import random
+
+from app.domain import BossDirective, CompanyProject, OfficeTargets
 from app.meeting_session import MeetingSession
 from app.directive_router import route_directive
 from app.meeting_runtime import MeetingRuntime
@@ -63,6 +65,9 @@ class OfficeRuntime:
             for command_item in commands:
                 command_item.payload["directive_route"] = route.__dict__
             return commands
+        errand_commands = self._dispatch_errand(directive, route)
+        if errand_commands:
+            return self._with_stream_commands(errand_commands)
         assigned_tasks = await self.planning.create_directive_tasks(directive)
 
         commands: list[AgentCommand] = []
@@ -75,6 +80,58 @@ class OfficeRuntime:
             command_item.payload["directive_route"] = route.__dict__
             commands.append(command_item)
         return self._with_stream_commands(commands)
+
+    def _match_errand(self, directive: BossDirective) -> tuple[str, str] | None:
+        """识别「让 A 去找 B …」式指派：文本里出现两个员工名字 + 找人动词。"""
+        text = directive.text
+        if not any(word in text for word in ["去找", "找", "问", "催", "确认", "沟通", "对齐", "碰"]):
+            return None
+        mentioned: list[tuple[int, str]] = []
+        for agent in self.agents.values():
+            index = text.find(agent.name)
+            if index >= 0:
+                mentioned.append((index, agent.worker_id))
+        if len(mentioned) < 2:
+            return None
+        mentioned.sort()
+        actor_id, helper_id = mentioned[0][1], mentioned[1][1]
+        if actor_id == helper_id:
+            return None
+        return actor_id, helper_id
+
+    def _dispatch_errand(self, directive: BossDirective, route) -> list[AgentCommand]:
+        """老板指派优先级高于当前工作：被点名的人立刻去找目标同事，办完自动回原任务。"""
+        matched = self._match_errand(directive)
+        if not matched:
+            return []
+        actor_id, helper_id = matched
+        if self.meeting.locks_worker(actor_id):
+            return []
+        helper_desk = self.targets.own_desk(helper_id)
+        if not helper_desk:
+            return []
+        actor = self.agents[actor_id]
+        helper = self.agents[helper_id]
+        actor.interrupt_for_errand(directive, helper_id)
+        say = random.choice([
+            f"收到，我这就去找{helper.name}。",
+            f"好，我去跟{helper.name}碰一下。",
+            f"行，我去{helper.name}那边问问。",
+        ])
+        context = {
+            "intent": f"老板指派：去找 {helper.name} 处理「{directive.text[:40]}」",
+            "work_update": f"中断手头工作，优先去找 {helper.name}",
+            "risk_note": "",
+            "needs_help_from": helper_id,
+            "confirmation_question": directive.text[:100],
+            "confidence": 0.92,
+            "behavior_state": "errand_dispatch",
+            "stream_lines": [f"老板点名：{directive.text[:60]}", f"去找 {helper.name}。"],
+        }
+        command = actor.move_command(helper_desk, say, context, "visit")
+        command.payload["decision_source"] = "rule_immediate"
+        command.payload["directive_route"] = dict(route.__dict__)
+        return [command]
 
     async def autonomy_tick(self, worker_ids: list[str] | None = None) -> list[AgentCommand]:
         """主动推进员工自主循环，给网页模拟或定时器使用。"""
