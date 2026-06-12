@@ -66,6 +66,7 @@ class OfficeAgent:
     current_risk: str = ""
     confirmation_question: str = ""
     assigned_meeting_seat: str = ""
+    dwell_ticks: int = 0
     fsm: WorkerStateMachine = field(default_factory=WorkerStateMachine)
     memory: list[str] = field(default_factory=list)
 
@@ -92,6 +93,7 @@ class OfficeAgent:
         self.current_risk = ""
         self.confirmation_question = ""
         self.assigned_meeting_seat = ""
+        self.dwell_ticks = 0
         self.fsm.reset()
 
     def apply_directive(self, directive: BossDirective, task: ProjectTask | None = None) -> None:
@@ -117,11 +119,17 @@ class OfficeAgent:
         find_command = await continue_find_person_flow(self, event, targets, agents)
         if find_command:
             return find_command
+        chat_command = self._maybe_water_cooler_chat(event, targets, agents)
+        if chat_command:
+            return chat_command
         self._sync_task_focus(company)
         self._advance_work_if_possible(event, targets, company)
         reaction_command = self._react_to_current_place(event, targets, company)
         if reaction_command:
             return reaction_command
+        if event.type == "autonomy_tick" and self.dwell_ticks > 0:
+            self.dwell_ticks -= 1
+            return self.idle_command("")
         if not targets.all_targets():
             return self.idle_command("还没有同步场景目标。")
 
@@ -163,7 +171,7 @@ class OfficeAgent:
             return None
         decision = decision_from_llm_data(data, active_task)
         decision.helper_id = normalize_colleague_id(decision.helper_id or decision.needs_help_from, self.worker_id, agents)
-        if decision.needs_help_from:
+        if decision.helper_id:
             decision.needs_help_from = decision.helper_id
         if decision.helper_id and decision.intent in (ActionIntent.WORK_AT_DESK, ActionIntent.STAY):
             decision.intent = ActionIntent.VISIT_COLLEAGUE
@@ -235,6 +243,36 @@ class OfficeAgent:
         if event.type == "worker_arrived":
             self.energy = max(0.1, self.energy - 0.015)
             self.status = f"到达 {event.target_id}"
+            self.dwell_ticks = 2
+
+    def _maybe_water_cooler_chat(self, event: WorkerEvent, targets: OfficeTargets, agents: dict[str, "OfficeAgent"]) -> AgentCommand | None:
+        """休息区/走动点碰到同事时低概率寒暄，增加办公室烟火气。"""
+        if event.type != "worker_arrived":
+            return None
+        spot = event.target_id or ""
+        if spot not in targets.idle_points and spot not in targets.roam_points:
+            return None
+        nearby = [a for a in agents.values() if a.worker_id != self.worker_id and a.last_target_id == spot]
+        if not nearby or random.random() > 0.4:
+            return None
+        colleague = random.choice(nearby)
+        line = random.choice([
+            f"{colleague.name}也在啊，今天那块顺利不？",
+            f"正好碰到{colleague.name}，缓会儿再回去。",
+            f"和{colleague.name}随便聊了两句。",
+        ])
+        self.remember(f"茶水间闲聊:{colleague.name}")
+        context = {
+            "intent": f"在休息区碰到 {colleague.name}，随口聊两句",
+            "work_update": "",
+            "risk_note": "",
+            "needs_help_from": "",
+            "confirmation_question": "",
+            "confidence": 0.5,
+            "behavior_state": "social_loop",
+            "stream_lines": [f"碰到 {colleague.name} 了，闲聊两句。"],
+        }
+        return self.say_command(line, context)
 
     def _directive_is_meeting(self) -> bool:
         meeting_words = ["讨论", "开会", "会议", "评审", "对齐", "同步", "复盘", "碰一下"]

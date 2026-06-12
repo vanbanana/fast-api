@@ -3,6 +3,7 @@
 找人 -> 扑空改去对方当前位置 -> 当面沟通 -> 对方挂起一句回应。
 状态全部由 WorkerStateMachine 承载，worker_agent 只负责编排。
 """
+import random
 from typing import TYPE_CHECKING
 
 from app.domain import OfficeTargets
@@ -69,6 +70,14 @@ async def continue_find_person_flow(
         helper.remember(f"协作回应:{agent.name}:{text_value(context.get('confirmation_question', '')) or text_value(context.get('work_update', ''))}")
         agent.remember(f"协作沟通:{helper.name}:{text_value(context.get('work_update', ''))}")
         return agent.say_command(text_value(context.get("say", "")), context)
+
+    # 追了一轮还没遇上（对方持续移动），放弃追逐回到正常决策，避免无限绕圈
+    if fsm.checked_helper_desk:
+        helper_name = helper.name
+        fsm.transition(WorkerState.IDLE)
+        agent.needs_help_from = ""
+        agent.remember(f"工作记忆:没遇到 {helper_name}，先回去推进自己的部分")
+        return None
     return None
 
 
@@ -104,8 +113,12 @@ async def build_collaboration_context(agent: "OfficeAgent", helper: "OfficeAgent
                 f"{helper.name}回应：{reply}",
                 next_step,
             ],
-            "say": f"{agent.name}：明白，我按这个去推进。",
-            "helper_say": f"{helper.name}：{reply}",
+            "say": random.choice([
+                "明白，我按这个去推。",
+                "行，那我先这么改。",
+                "好，有问题我再来找你。",
+            ]),
+            "helper_say": reply,
         }
 
     if "测试" in helper.role:
@@ -130,8 +143,12 @@ async def build_collaboration_context(agent: "OfficeAgent", helper: "OfficeAgent
             f"已找到 {helper.name}。",
             update,
         ],
-        "say": f"{agent.name}：{question}",
-        "helper_say": f"{helper.name}：我先看这块，{update}。",
+        "say": question,
+        "helper_say": random.choice([
+            "我先看这块，回头给你结论。",
+            "这个我了解，下午给你答复。",
+            "行，这块我接了，你先忙别的。",
+        ]),
     }
 
 

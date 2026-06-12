@@ -7,10 +7,16 @@ extends Resource
 @export_category("布局")
 @export var boss_panel_position: Vector2 = Vector2(12, 10)
 @export var boss_panel_size: Vector2 = Vector2(360, 76)
+@export var boss_panel_margin_bottom: float = 10.0
+@export var token_bar_size: Vector2 = Vector2(300, 22)
+@export var token_bar_margin_top: float = 8.0
 @export var detail_panel_size: Vector2 = Vector2(330, 210)
 @export var detail_panel_offset: Vector2 = Vector2(14, 14)
 @export var speech_bubble_offset: Vector2 = Vector2(-46, -46)
 @export var speech_bubble_size: Vector2 = Vector2(94, 34)
+@export var speech_bubble_max_height: float = 58.0
+@export var status_bubble_offset: Vector2 = Vector2(-26, -64)
+@export var status_bubble_min_size: Vector2 = Vector2(52, 12)
 @export var viewport_padding: float = 8.0
 @export var row_separation: int = 6
 
@@ -18,6 +24,7 @@ extends Resource
 @export var ui_font_size: int = 12
 @export var detail_font_size: int = 10
 @export var speech_font_size: int = 8
+@export var status_font_size: int = 7
 @export var text_color: Color = Color(0.95, 0.96, 0.88)
 @export var detail_text_color: Color = Color(0.93, 0.95, 0.88)
 @export var placeholder_color: Color = Color(0.62, 0.63, 0.58)
@@ -39,6 +46,14 @@ extends Resource
 @export var speech_type_chars_per_second: float = 18.0
 @export var speech_hold_seconds: float = 2.8
 @export var thinking_dot_seconds: float = 0.28
+@export var speech_corner_radius: int = 6
+
+@export_category("常驻状态小气泡")
+@export var status_bg_color: Color = Color(0.10, 0.11, 0.14, 0.82)
+@export var status_border_color: Color = Color(0.55, 0.52, 0.40, 0.9)
+@export var status_text_color: Color = Color(0.92, 0.93, 0.86, 1.0)
+@export var status_border_width: int = 1
+@export var status_corner_radius: int = 5
 
 @export_category("程序化输入框")
 @export var field_bg_color: Color = Color(0.10, 0.11, 0.13, 0.96)

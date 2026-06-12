@@ -1,3 +1,4 @@
+import random
 from typing import Protocol
 
 from app.domain import ProjectTask
@@ -24,7 +25,11 @@ def build_rule_work_context(worker: WorkerRuleLike, target_id: str, active_task:
         "confirmation_question": "",
         "memory_note": f"决定去 {target_id} 处理 {task_title}",
         "confidence": 0.68,
-        "say": f"{worker.name}：我先处理「{task_title}」。",
+        "say": random.choice([
+            f"我先处理「{task_title}」。",
+            f"接下来搞「{task_title}」这块。",
+            f"「{task_title}」这个我来推。",
+        ]),
     }
     if not worker.current_directive and active_task is None:
         context.update({
@@ -56,7 +61,11 @@ def build_rule_work_context(worker: WorkerRuleLike, target_id: str, active_task:
             "intent": "短暂休息，避免压力影响判断",
             "work_update": "暂停推进，恢复精力后继续",
             "risk_note": "状态偏低，继续硬推可能降低质量",
-            "say": f"{worker.name}：我缓一下，避免把问题越改越乱。",
+            "say": random.choice([
+                "我缓一下，避免把问题越改越乱。",
+                "脑子有点转不动了，去倒杯水。",
+                "先歇会儿，回来再看这块。",
+            ]),
             "confidence": 0.62,
         })
 
@@ -72,14 +81,30 @@ def build_rule_work_context(worker: WorkerRuleLike, target_id: str, active_task:
 
 def desk_work_line(worker: WorkerRuleLike, task_title: str) -> str:
     if "后端" in worker.role or "架构" in worker.role:
-        return f"{worker.name}：我先看边界和日志，再动「{task_title}」。"
+        return random.choice([
+            f"先看边界和日志，再动「{task_title}」。",
+            "接口这块我先跑一遍再说。",
+            f"「{task_title}」这个得先把边界条件搞清楚。",
+        ])
     if "测试" in worker.role:
-        return f"{worker.name}：我会把复现步骤和回归点补齐。"
+        return random.choice([
+            "复现步骤和回归点我补齐。",
+            "我先跑一轮用例，有问题再说。",
+        ])
     if "产品" in worker.role:
-        return f"{worker.name}：我先把验收标准写清楚。"
+        return random.choice([
+            "验收标准我先写清楚。",
+            "场景这块我再梳一遍。",
+        ])
     if "UI" in worker.role or "前端" in worker.role:
-        return f"{worker.name}：我先确认状态和交互细节。"
-    return f"{worker.name}：我回工位推进「{task_title}」。"
+        return random.choice([
+            "状态和交互细节我先确认一下。",
+            "页面这块我先过一遍。",
+        ])
+    return random.choice([
+        f"回工位推「{task_title}」。",
+        f"继续搞「{task_title}」。",
+    ])
 
 
 def suggest_helper(worker: WorkerRuleLike, active_task: ProjectTask | None) -> str:

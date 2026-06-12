@@ -22,9 +22,14 @@ func setup(ui_theme: PixelUiTheme) -> void:
 
 	var panel := PanelContainer.new()
 	panel.name = "BossCommandPanel"
-	panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	panel.position = theme.boss_panel_position
+	panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
 	panel.custom_minimum_size = theme.boss_panel_size
+	panel.offset_left = -theme.boss_panel_size.x / 2.0
+	panel.offset_right = theme.boss_panel_size.x / 2.0
+	panel.offset_bottom = -theme.boss_panel_margin_bottom
+	panel.offset_top = -theme.boss_panel_margin_bottom - theme.boss_panel_size.y
+	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_styles.apply_panel_style(panel)
 	layer.add_child(panel)
 

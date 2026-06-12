@@ -2,6 +2,7 @@
 from app.meeting_session import MeetingSession
 from app.directive_router import route_directive
 from app.meeting_runtime import MeetingRuntime
+from app.office_clock import office_clock
 from app.planning_service import ProjectPlanningService
 from app.schemas import AgentCommand, AgentSnapshot, BossCommand, CompanySnapshot, ProjectTaskSnapshot, WorkerEvent
 from app.worker_agent import OfficeAgent
@@ -43,6 +44,8 @@ class OfficeRuntime:
         if self.meeting.locks_worker(event.worker_id):
             return [self.meeting.locked_worker_command(event)]
 
+        if event.type == "autonomy_tick":
+            office_clock.advance(1.0 / max(1, len(self.agents)))
         agent = self._get_or_create_agent(event.worker_id)
         return self._with_stream_commands([await agent.decide(event, self.targets, self.company, self.agents)])
 
@@ -75,6 +78,7 @@ class OfficeRuntime:
 
     async def autonomy_tick(self, worker_ids: list[str] | None = None) -> list[AgentCommand]:
         """主动推进员工自主循环，给网页模拟或定时器使用。"""
+        office_clock.advance()
         commands: list[AgentCommand] = []
         selected_ids = set(worker_ids or [])
         for agent in self.agents.values():
@@ -142,6 +146,7 @@ class OfficeRuntime:
         self.meeting.update_context(self.company, self.targets, self.planning)
         self.meeting.clear()
         self.directives.clear()
+        office_clock.reset()
         for agent in self.agents.values():
             agent.reset_runtime_state()
 

@@ -9,6 +9,7 @@ const DetailPanel := preload("res://scenes/components/detail_panel.gd")
 const DebugPanel := preload("res://scenes/components/debug_panel.gd")
 const BossCommandUi := preload("res://scenes/components/boss_command_ui.gd")
 const AgentStateStore := preload("res://scenes/components/agent_state_store.gd")
+const TokenBar := preload("res://scenes/components/token_bar.gd")
 
 @export_category("后端连接")
 @export var backend_enabled: bool = true
@@ -35,6 +36,7 @@ var speech_bubbles: SpeechBubbles
 var detail_panel: DetailPanel
 var debug_panel: DebugPanel
 var boss_ui: BossCommandUi
+var token_bar: TokenBar
 var agent_store := AgentStateStore.new()
 
 var worker_nodes: Dictionary = {}
@@ -83,6 +85,11 @@ func _ready() -> void:
 		detail_panel.local_worker_profiles = local_worker_profiles
 		add_child(detail_panel)
 		detail_panel.setup(self, pixel_ui_theme, agent_store)
+
+	token_bar = TokenBar.new()
+	token_bar.name = "TokenBar"
+	add_child(token_bar)
+	token_bar.setup(pixel_ui_theme)
 
 	if speech_bubble_enabled:
 		speech_bubbles = SpeechBubbles.new()
@@ -260,9 +267,16 @@ func send_boss_command(text: String, target_worker_ids: Array[String] = [], prio
 func _apply_agent_command(command: Dictionary) -> void:
 	if debug_panel != null:
 		debug_panel.log_received_command(command)
-	agent_store.cache_command(command)
-
 	var action := str(command.get("action", ""))
+	if action == "token_usage":
+		var usage_value: Variant = command.get("payload", {})
+		if token_bar != null and usage_value is Dictionary:
+			token_bar.update_usage(usage_value as Dictionary)
+		return
+
+	agent_store.cache_command(command)
+	_update_status_bubble(str(command.get("worker_id", "")))
+
 	if action == "say":
 		_apply_say_command(command)
 		return
@@ -381,6 +395,13 @@ func _on_meeting_say_done_timeout(worker_id: String, session_id: String, key: St
 func _show_speech(worker_id: String, text: String) -> void:
 	if speech_bubbles != null:
 		speech_bubbles.show_speech(worker_id, text)
+
+
+func _update_status_bubble(worker_id: String) -> void:
+	if speech_bubbles == null or worker_id.is_empty() or worker_id == "office":
+		return
+	var snapshot := agent_store.snapshot_for(worker_id)
+	speech_bubbles.set_status(worker_id, str(snapshot.get("status", "")))
 
 
 func _clear_all_speech_bubbles() -> void:

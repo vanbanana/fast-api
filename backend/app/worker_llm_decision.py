@@ -7,6 +7,7 @@ from typing import Protocol
 
 from app.domain import CompanyProject, ProjectTask
 from app.memory import memory_store
+from app.office_clock import office_clock
 from app.prompt_library import render
 from app.schemas import WorkerEvent
 from app.worker_intent import WorkerDecision, parse_intent
@@ -37,7 +38,7 @@ def build_agent_decision_messages(
     colleagues: list[str],
 ) -> tuple[str, str]:
     task_text = active_task.snapshot().model_dump() if active_task else "无"
-    system = render("agent_decision_system.md")
+    system = render("agent_decision_system.md", speech_rules=render("natural_speech_rules.md"))
     user = render(
         "agent_decision_user.md",
         roleplay_prompt=worker.roleplay_prompt(),
@@ -54,6 +55,7 @@ def build_agent_decision_messages(
         colleagues=colleagues,
         event_text=event.model_dump(),
         recent_memory=worker.memory[-10:],
+        time_phase=office_clock.phase_label(),
     )
     return system, user
 

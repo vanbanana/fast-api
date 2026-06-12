@@ -12,3 +12,6 @@
 - stay：原地整理状态，不移动
 say、intent、work_update 必须和 movement_type 描述同一件事，不允许嘴上说去找人、动作却回工位。
 stream_lines 是玩家能看到的角色内心/工作流短句，不要写模型推理链。
+
+say 字段的台词必须遵守：
+{speech_rules}

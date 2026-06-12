@@ -17,12 +17,26 @@ class MimoClient:
 
     def __init__(self) -> None:
         self._url = settings.mimo_base_url.rstrip("/") + "/chat/completions"
+        self.usage_totals: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+
+    def usage_snapshot(self) -> dict[str, int]:
+        return dict(self.usage_totals)
+
+    def _record_usage(self, usage: dict[str, Any]) -> None:
+        """累计官方 usage 字段返回的 token 消耗，供前端消耗条展示。"""
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(key, 0)
+            if isinstance(value, (int, float)):
+                self.usage_totals[key] += int(value)
+        self.usage_totals["calls"] += 1
 
     async def complete_json(self, system: str, user: str) -> dict[str, Any]:
         if not self._enabled():
             return {}
         payload = self._base_payload(system, user, temperature=0.4, max_tokens=1024)
-        message = await self._post(payload, timeout=60.0)
+        message = await self._safe_post(payload, timeout=60.0)
+        if not message:
+            return {}
         content = (message.get("content") or message.get("reasoning_content") or "").strip()
         return self._extract_json_from_text(content)
 
@@ -45,7 +59,7 @@ class MimoClient:
     ) -> str:
         """会议发言专用调用：每次只让当前 speaker 回应共享会议上下文。"""
         history = "\n".join(f"{item['speaker']}: {item['text']}" for item in transcript[-10:])
-        system = render("meeting_reply_system.md")
+        system = render("meeting_reply_system.md", speech_rules=render("natural_speech_rules.md"))
         user = render(
             "meeting_reply_user.md",
             topic=topic,
@@ -78,7 +92,7 @@ class MimoClient:
     ) -> dict[str, Any]:
         """团队规划专用调用：让一个角色在共享上下文里产出可执行工作项。"""
         history = "\n".join(f"{item['speaker']}: {item['text']}" for item in transcript[-8:])
-        system = render("planning_reply_system.md")
+        system = render("planning_reply_system.md", speech_rules=render("natural_speech_rules.md"))
         user = render(
             "planning_reply_user.md",
             objective=objective,
@@ -129,7 +143,7 @@ class MimoClient:
         risk_note: str,
     ) -> dict[str, Any]:
         """一对一协作 handoff：目标同事按岗位给出可执行回应。"""
-        system = render("colleague_reply_system.md")
+        system = render("colleague_reply_system.md", speech_rules=render("natural_speech_rules.md"))
         user = render(
             "colleague_reply_user.md",
             requester_name=requester_name,
@@ -170,7 +184,9 @@ class MimoClient:
         payload = self._base_payload(system, user, temperature=temperature, max_tokens=max_tokens)
         payload["tools"] = [tool]
         payload["tool_choice"] = {"type": "function", "function": {"name": tool_name}}
-        message = await self._post(payload, timeout=timeout)
+        message = await self._safe_post(payload, timeout=timeout)
+        if not message:
+            return {}
         data = self._extract_tool_arguments(message, tool_name)
         if data:
             return data
@@ -192,6 +208,13 @@ class MimoClient:
             "thinking": {"type": "disabled"},
         }
 
+    async def _safe_post(self, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        """LLM 不确定性兜底：网络/限流/响应结构异常统一返回空，调用方降级规则。"""
+        try:
+            return await self._post(payload, timeout=timeout)
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+            return {}
+
     async def _post(self, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {settings.mimo_api_key}",
@@ -200,7 +223,11 @@ class MimoClient:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             response = await client.post(self._url, headers=headers, json=payload)
             response.raise_for_status()
-        return response.json()["choices"][0]["message"]
+        data = response.json()
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            self._record_usage(usage)
+        return data["choices"][0]["message"]
 
     def _agent_decision_tool(self) -> dict[str, Any]:
         return {

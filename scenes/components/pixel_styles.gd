@@ -26,11 +26,24 @@ func apply_speech_bubble_style(panel: PanelContainer) -> void:
 	style.bg_color = theme.speech_bg_color
 	style.border_color = theme.speech_border_color
 	style.set_border_width_all(theme.speech_border_width)
-	style.set_corner_radius_all(theme.corner_radius)
+	style.set_corner_radius_all(theme.speech_corner_radius)
 	style.set_content_margin(SIDE_LEFT, 4.0)
 	style.set_content_margin(SIDE_TOP, 3.0)
 	style.set_content_margin(SIDE_RIGHT, 4.0)
 	style.set_content_margin(SIDE_BOTTOM, 3.0)
+	panel.add_theme_stylebox_override("panel", style)
+
+
+func apply_status_bubble_style(panel: PanelContainer) -> void:
+	var style := StyleBoxFlat.new()
+	style.bg_color = theme.status_bg_color
+	style.border_color = theme.status_border_color
+	style.set_border_width_all(theme.status_border_width)
+	style.set_corner_radius_all(theme.status_corner_radius)
+	style.set_content_margin(SIDE_LEFT, 3.0)
+	style.set_content_margin(SIDE_TOP, 1.0)
+	style.set_content_margin(SIDE_RIGHT, 3.0)
+	style.set_content_margin(SIDE_BOTTOM, 1.0)
 	panel.add_theme_stylebox_override("panel", style)
 
 

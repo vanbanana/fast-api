@@ -43,7 +43,7 @@ async def verify_colleague_interaction() -> None:
         assert command.action == "say"
         assert command.payload.get("display") == "speech"
         assert command.payload.get("behavior_state") == "collaboration_loop"
-        assert "林主管" in command.say
+        assert command.say.strip() != ""
         assert seeker.fsm.helper_id == ""
         assert seeker.fsm.state.value == "collaborating"
         assert seeker.needs_help_from == ""
@@ -57,7 +57,7 @@ async def verify_colleague_interaction() -> None:
         assert helper_command.action == "say"
         assert helper_command.payload.get("display") == "speech"
         assert helper_command.payload.get("behavior_state") == "collaboration_reply_loop"
-        assert "小周" in helper_command.say
+        assert helper_command.say.strip() != ""
         assert helper.fsm.pending_reply.is_empty()
     finally:
         settings.llm_enabled = old_llm_enabled

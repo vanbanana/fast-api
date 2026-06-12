@@ -1,7 +1,12 @@
+import logging
+
 from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 
+from app.llm_client import llm_client
 from app.runtime import office_runtime
 from app.schemas import AgentCommand, AgentSnapshot, BossCommand, CompanySnapshot, ProjectTaskSnapshot, WorkerEvent
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Purr-formance Office Agents")
 
@@ -41,15 +46,37 @@ async def agents_tick(worker_ids: list[str] | None = Body(default=None)) -> list
     return await office_runtime.autonomy_tick(worker_ids)
 
 
+@app.get("/usage")
+async def usage() -> dict[str, int]:
+    """查看本次运行累计的 LLM token 消耗（来自官方 usage 字段）。"""
+    return llm_client.usage_snapshot()
+
+
 @app.websocket("/ws/office")
 async def office_ws(websocket: WebSocket) -> None:
     await websocket.accept()
+    last_usage: dict[str, int] = {}
     try:
         while True:
             data = await websocket.receive_json()
-            event = WorkerEvent.model_validate(data)
-            commands = await office_runtime.handle_event(event)
+            try:
+                event = WorkerEvent.model_validate(data)
+                commands = await office_runtime.handle_event(event)
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                logger.exception("handle_event failed: %s", data)
+                continue
             for command in commands:
                 await websocket.send_json(command.model_dump())
+            current_usage = llm_client.usage_snapshot()
+            if current_usage != last_usage:
+                last_usage = current_usage
+                await websocket.send_json({
+                    "worker_id": "office",
+                    "action": "token_usage",
+                    "say": "",
+                    "payload": current_usage,
+                })
     except WebSocketDisconnect:
         return
