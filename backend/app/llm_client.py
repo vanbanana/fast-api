@@ -3,6 +3,7 @@
 只保留一条 function-calling 传输通道 `_call_function_tool`，
 五种业务调用复用同一传输层；提示词全部来自 app.prompt_library。
 """
+import asyncio
 import json
 import logging
 from typing import Any
