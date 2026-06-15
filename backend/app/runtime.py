@@ -58,6 +58,12 @@ class OfficeRuntime:
         if self.meeting.locks_worker(event.worker_id):
             return [self.meeting.locked_worker_command(event)]
 
+        # 会议结束后，有人回到工位 → 推送 pending task_update
+        if event.type == "worker_arrived":
+            pending = self.meeting.consume_pending_task_update(event.worker_id)
+            if pending:
+                return [pending]
+
         agent = self._get_or_create_agent(event.worker_id)
         return [AgentCommand(worker_id=agent.worker_id, action="idle", say="")]
 

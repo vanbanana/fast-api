@@ -23,6 +23,8 @@ class MeetingRuntime:
         self.agents = agents
         self.planning = planning
         self.active_session: MeetingSession | None = None
+        # 会议结束后暂存 task_update，等有人回到工位再推送
+        self._pending_task_update: AgentCommand | None = None
 
     def update_context(self, company: CompanyProject, targets: OfficeTargets, planning: ProjectPlanningService) -> None:
         self.company = company
@@ -35,6 +37,15 @@ class MeetingRuntime:
             if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()
         self.active_session = None
+        self._pending_task_update = None
+
+    def consume_pending_task_update(self, worker_id: str) -> AgentCommand | None:
+        """会议结束后，第一个回到工位的人触发 task_update 推送。"""
+        if self._pending_task_update is None:
+            return None
+        cmd = self._pending_task_update
+        self._pending_task_update = None
+        return cmd
 
     def start_meeting(self, directive: BossDirective) -> list[AgentCommand]:
         directive.target_worker_ids = self._select_meeting_workers(directive)
@@ -454,8 +465,8 @@ class MeetingRuntime:
                 payload=payload,
             ))
         self.active_session = None
-        # 推送任务列表更新到前端手机UI
-        commands.append(AgentCommand(
+        # 暂存 task_update，等人回到工位再推送（不在 move_to 同一批发）
+        self._pending_task_update = AgentCommand(
             worker_id="office",
             action="task_update",
             say="",
@@ -464,7 +475,7 @@ class MeetingRuntime:
                 "prd_summary": session.prd_final or "",
                 "meeting_topic": session.topic,
             },
-        ))
+        )
         return commands
 
     def _select_meeting_workers(self, directive: BossDirective) -> list[str]:

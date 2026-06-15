@@ -23,6 +23,8 @@ class MimoClient:
         self.usage_totals: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
         # LLM 调用日志缓冲区，供 main.py 通过 WebSocket 推送到 Godot F12 面板
         self.log_buffer: list[dict[str, Any]] = []
+        # 并发控制：最多 5 个并发 LLM 调用，防止限流崩溃
+        self.semaphore = asyncio.Semaphore(5)
 
     def drain_log(self) -> list[dict[str, Any]]:
         """取出并清空日志缓冲区。"""
@@ -491,49 +493,50 @@ class MimoClient:
             return {}
 
     async def _post(self, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {settings.mimo_api_key}",
-            "Content-Type": "application/json",
-        }
-        # 从 user message 提取调用类型标签（取前 30 字符）
-        call_tag = "?"
-        msgs = payload.get("messages", [])
-        if msgs:
-            last = msgs[-1]
-            content = last.get("content", "")
-            if isinstance(content, str) and content:
-                call_tag = content[:30].replace("\n", " ")
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            response = await client.post(self._url, headers=headers, json=payload)
-            response.raise_for_status()
-        data = response.json()
-        usage = data.get("usage")
-        entry: dict[str, Any] = {"tag": call_tag, "tokens_in": 0, "tokens_out": 0, "result": ""}
-        if isinstance(usage, dict):
-            self._record_usage(usage)
-            entry["tokens_in"] = usage.get("prompt_tokens", 0)
-            entry["tokens_out"] = usage.get("completion_tokens", 0)
-            logger.info("[LLM] %s | tokens: in=%d out=%d total=%d",
-                        call_tag,
-                        entry["tokens_in"], entry["tokens_out"],
-                        usage.get("total_tokens", 0))
-        msg = data["choices"][0]["message"]
-        # 记录返回的关键字段
-        tool_calls = msg.get("tool_calls")
-        if tool_calls:
-            for tc in tool_calls:
-                fn = (tc.get("function") or {}).get("name", "?")
-                args_str = json.dumps((tc.get("function") or {}).get("args", {}), ensure_ascii=False)[:80]
-                entry["result"] = "%s(%s)" % (fn, args_str)
-                logger.info("[LLM→] %s(%s)", fn, args_str)
-        else:
-            say = (msg.get("content") or "").strip()[:60]
-            if say:
-                entry["result"] = say
-                logger.info("[LLM→] say=%s", say)
-        # 写入缓冲区，供 main.py 通过 WebSocket 推送到 Godot F12 面板
-        self.log_buffer.append(entry)
-        return msg
+        async with self.semaphore:
+            headers = {
+                "Authorization": f"Bearer {settings.mimo_api_key}",
+                "Content-Type": "application/json",
+            }
+            # 从 user message 提取调用类型标签（取前 30 字符）
+            call_tag = "?"
+            msgs = payload.get("messages", [])
+            if msgs:
+                last = msgs[-1]
+                content = last.get("content", "")
+                if isinstance(content, str) and content:
+                    call_tag = content[:30].replace("\n", " ")
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                response = await client.post(self._url, headers=headers, json=payload)
+                response.raise_for_status()
+            data = response.json()
+            usage = data.get("usage")
+            entry: dict[str, Any] = {"tag": call_tag, "tokens_in": 0, "tokens_out": 0, "result": ""}
+            if isinstance(usage, dict):
+                self._record_usage(usage)
+                entry["tokens_in"] = usage.get("prompt_tokens", 0)
+                entry["tokens_out"] = usage.get("completion_tokens", 0)
+                logger.info("[LLM] %s | tokens: in=%d out=%d total=%d",
+                            call_tag,
+                            entry["tokens_in"], entry["tokens_out"],
+                            usage.get("total_tokens", 0))
+            msg = data["choices"][0]["message"]
+            # 记录返回的关键字段
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                for tc in tool_calls:
+                    fn = (tc.get("function") or {}).get("name", "?")
+                    args_str = json.dumps((tc.get("function") or {}).get("args", {}), ensure_ascii=False)[:80]
+                    entry["result"] = "%s(%s)" % (fn, args_str)
+                    logger.info("[LLM→] %s(%s)", fn, args_str)
+            else:
+                say = (msg.get("content") or "").strip()[:60]
+                if say:
+                    entry["result"] = say
+                    logger.info("[LLM→] say=%s", say)
+            # 写入缓冲区，供 main.py 通过 WebSocket 推送到 Godot F12 面板
+            self.log_buffer.append(entry)
+            return msg
 
     def _agent_decision_tool(self) -> dict[str, Any]:
         return {
