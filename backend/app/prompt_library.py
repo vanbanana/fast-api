@@ -15,9 +15,9 @@ def _load(name: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def render(name: str, **slots: object) -> str:
+def render(template_name: str, **slots: object) -> str:
     """加载模板并填充 {slot} 槽位。"""
-    text = _load(name)
+    text = _load(template_name)
     if slots:
         return text.format(**slots)
     return text

@@ -27,9 +27,16 @@ func cache_command(command: Dictionary) -> void:
 
 	var payload: Variant = command.get("payload", {})
 	if payload is Dictionary and !payload.is_empty():
-		snapshots[worker_id] = payload
-		if payload.has("work_context") and payload["work_context"] is Dictionary:
-			work_contexts[worker_id] = payload["work_context"]
+		# 合并而非替换，避免 chat_line 等命令冲掉 profile 中的 name/role
+		var existing_value: Variant = snapshots.get(worker_id, {})
+		var existing: Dictionary = {}
+		if existing_value is Dictionary:
+			existing = existing_value as Dictionary
+		var p := payload as Dictionary
+		existing.merge(p, true)   # true = overwrite existing keys
+		snapshots[worker_id] = existing
+		if p.has("work_context") and p["work_context"] is Dictionary:
+			work_contexts[worker_id] = p["work_context"]
 
 	if !say.is_empty():
 		if !snapshots.has(worker_id):
@@ -37,6 +44,12 @@ func cache_command(command: Dictionary) -> void:
 		var snapshot: Dictionary = snapshots[worker_id] as Dictionary
 		snapshot["last_say"] = say
 		snapshots[worker_id] = snapshot
+
+
+func clear() -> void:
+	snapshots.clear()
+	work_contexts.clear()
+	streams.clear()
 
 
 func snapshot_for(worker_id: String) -> Dictionary:

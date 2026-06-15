@@ -18,10 +18,27 @@ class AgentCommand(BaseModel):
 
     type: Literal["command"] = "command"
     worker_id: str
-    action: Literal["move_to", "say", "idle", "stream_delta"] = "move_to"
+    action: Literal["move_to", "say", "idle", "status", "stream_delta",
+               "errand_seek", "atmosphere_response", "token_usage",
+               "llm_log", "chat_line", "chat_end", "chat_canceled",
+               "task_update"] = "move_to"
     target_id: str | None = None
     say: str = ""
+    status: str = ""
+    display_name: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class A2AEvent(BaseModel):
+    """Godot 发来的 A2A 对话事件。"""
+    event: Literal["chat_started", "chat_turn", "chat_timeout"]
+    session_id: str = ""
+    speaker_id: str = ""      # 发起人 worker_id
+    listener_id: str = ""     # 被找的人 worker_id
+    directive_text: str = ""  # 老板原始指令
+    last_sayer_id: str = ""   # 上一轮说话的人
+    last_text: str = ""       # 上一轮的台词
+    transcript: str = ""      # 完整对话摘要（最近4轮）
 
 
 class BossCommand(BaseModel):
@@ -85,3 +102,26 @@ class CompanySnapshot(BaseModel):
     done_tasks: int
     agents: list[AgentSnapshot]
     tasks: list[ProjectTaskSnapshot]
+
+
+class AtmosphereRequest(BaseModel):
+    """Godot 上报的员工状态，用于请求氛围数据。"""
+    worker_id: str
+    name: str
+    role: str
+    personality: str
+    state: str
+    location: str
+    nearby_workers: list[str] = Field(default_factory=list)
+    last_event: str = ""
+    current_task: str = ""
+    energy: float = 1.0
+    stress: float = 0.0
+
+
+class AtmosphereResponse(BaseModel):
+    """后端返回的氛围数据：台词+状态+心情。"""
+    say: str = ""
+    status: str = ""
+    mood: str = ""
+    observation: str = ""

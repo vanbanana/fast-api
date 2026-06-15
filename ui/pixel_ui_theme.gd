@@ -12,15 +12,16 @@ extends Resource
 @export var token_bar_margin_bottom: float = 8.0
 @export var detail_panel_size: Vector2 = Vector2(330, 210)
 @export var detail_panel_offset: Vector2 = Vector2(14, 14)
-@export var speech_bubble_offset: Vector2 = Vector2(-46, -46)
+@export var speech_bubble_offset: Vector2 = Vector2(-47, -85)
 @export var speech_bubble_size: Vector2 = Vector2(94, 34)
 @export var speech_bubble_max_height: float = 58.0
-@export var status_bubble_offset: Vector2 = Vector2(-26, -64)
+@export var status_bubble_offset: Vector2 = Vector2(-26, -47)
 @export var status_bubble_min_size: Vector2 = Vector2(52, 12)
 @export var viewport_padding: float = 8.0
 @export var row_separation: int = 6
 
 @export_category("文字")
+@export var font: FontFile = null
 @export var ui_font_size: int = 12
 @export var detail_font_size: int = 10
 @export var speech_font_size: int = 8
@@ -41,7 +42,7 @@ extends Resource
 @export_category("头顶气泡")
 @export var speech_bg_color: Color = Color(0.98, 0.96, 0.82, 0.96)
 @export var speech_border_color: Color = Color(0.22, 0.20, 0.18, 1.0)
-@export var speech_text_color: Color = Color(0.12, 0.11, 0.10, 1.0)
+@export var speech_text_color: Color = Color.BLACK
 @export var speech_border_width: int = 1
 @export var speech_type_chars_per_second: float = 18.0
 @export var speech_hold_seconds: float = 2.8
@@ -51,7 +52,7 @@ extends Resource
 @export_category("常驻状态小气泡")
 @export var status_bg_color: Color = Color(0.10, 0.11, 0.14, 0.82)
 @export var status_border_color: Color = Color(0.55, 0.52, 0.40, 0.9)
-@export var status_text_color: Color = Color(0.92, 0.93, 0.86, 1.0)
+@export var status_text_color: Color = Color.BLACK
 @export var status_border_width: int = 1
 @export var status_corner_radius: int = 5
 

@@ -45,6 +45,7 @@ func _process(delta: float) -> void:
 func connect_backend() -> void:
 	# WebSocketPeer 关闭后重新创建，避免复用旧连接状态。
 	_socket = WebSocketPeer.new()
+	_is_open = false
 	_reconnect_timer = 0.0
 	var error := _socket.connect_to_url(url)
 	if error != OK:

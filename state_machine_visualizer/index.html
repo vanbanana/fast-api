@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>多智能体复杂非线性状态机图 (FSM Mesh) | 毕业答辩系统</title>
+  <style>
+    :root {
+      --bg-color: #0e0e11; /* 极深灰黑色背景，无任何蓝色调 */
+      --grid-color: rgba(255, 255, 255, 0.07); /* 极细半透明白色网格，呈淡灰色，清晰且不刺眼 */
+      --node-bg: rgba(10, 10, 10, 0.95);
+      --border-color: #333333;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      
+      --wire-color: rgba(255, 255, 255, 0.15); /* 玻璃管道质感 */
+      --wire-glow: #0ea5e9;
+      
+      --color-idle: #10b981;
+      --color-work: #3b82f6;
+      --color-break: #f59e0b;
+      --color-meet: #8b5cf6;
+      --color-manager: #ec4899;
+      
+      --panel-bg: rgba(10, 10, 10, 0.95);
+    }
+
+    body, html {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background-color: var(--bg-color); color: var(--text-main);
+      font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden;
+    }
+
+    .grid-bg {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background-image: 
+        linear-gradient(to right, var(--grid-color) 1px, transparent 1px),
+        linear-gradient(to bottom, var(--grid-color) 1px, transparent 1px);
+      background-size: 30px 30px; z-index: 0;
+    }
+
+    #wire-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+    #nodes-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+
+    .node {
+      position: absolute; width: 150px; background: var(--node-bg);
+      border: 2px solid var(--border-color); border-radius: 8px;
+      box-shadow: 0 4px 20px rgba(0,0,0,1);
+      transform: translate(-50%, -50%); transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      display: flex; flex-direction: column; z-index: 50; pointer-events: auto;
+    }
+    
+    .node.active {
+      transform: translate(-50%, -50%) scale(1.15); z-index: 60;
+      box-shadow: 0 0 30px var(--wire-glow); border-color: var(--wire-glow);
+    }
+
+    .node-header { 
+      padding: 8px 10px; font-weight: bold; font-size: 13px; letter-spacing: 1px; 
+      border-bottom: 1px solid var(--border-color); border-radius: 6px 6px 0 0; 
+      display: flex; align-items: center; justify-content: center; text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+    }
+    
+    .bg-idle { border-top: 4px solid var(--color-idle); background: linear-gradient(180deg, rgba(16,185,129,0.15), transparent); }
+    .bg-work { border-top: 4px solid var(--color-work); background: linear-gradient(180deg, rgba(59,130,246,0.15), transparent); }
+    .bg-break { border-top: 4px solid var(--color-break); background: linear-gradient(180deg, rgba(245,158,11,0.15), transparent); }
+    .bg-meet { border-top: 4px solid var(--color-meet); background: linear-gradient(180deg, rgba(139,92,246,0.15), transparent); }
+    .bg-manager { border-top: 4px solid var(--color-manager); background: linear-gradient(180deg, rgba(236,72,153,0.15), transparent); }
+
+    .node-body { padding: 10px 10px; font-size: 11px; line-height: 1.5; color: var(--text-muted); text-align: center; }
+    
+    .pin { width: 8px; height: 8px; background: #fff; border: 2px solid #000; border-radius: 50%; position: absolute; z-index: 55; }
+    .pin.left { left: -5px; top: 50%; transform: translateY(-50%); } 
+    .pin.right { right: -5px; top: 50%; transform: translateY(-50%); }
+    .pin.top { top: -5px; left: 50%; transform: translateX(-50%); }
+    .pin.bottom { bottom: -5px; left: 50%; transform: translateX(-50%); }
+
+    .wire-label {
+      position: absolute; background: rgba(0, 0, 0, 0.95); border: 1px solid #333;
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; color: #aaa;
+      transform: translate(-50%, -50%); z-index: 10; 
+      transition: opacity 0.3s, transform 0.3s, border-color 0.3s, box-shadow 0.3s, background 0.3s; /* 移除 left/top 渐变以实现避让引擎精准瞬间重算 */
+      pointer-events: none;
+      white-space: nowrap; opacity: 0; box-shadow: 0 2px 10px rgba(0,0,0,0.8);
+    }
+    .wire-label.active { 
+      opacity: 1; color: #fff; border-color: var(--wire-glow); 
+      box-shadow: 0 0 15px var(--wire-glow); z-index: 40; 
+      background: rgba(14, 165, 233, 0.15); font-weight: bold; transform: translate(-50%, -50%) scale(1.15);
+    }
+
+    #inspector-panel {
+      position: absolute; bottom: 15px; left: 50%; transform: translateX(-50%);
+      width: 85%; max-width: 1200px; background: var(--panel-bg);
+      border: 1px solid #333; border-radius: 12px;
+      box-shadow: 0 -10px 30px rgba(0,0,0,0.9); display: flex; flex-direction: column; overflow: hidden; z-index: 100;
+    }
+    .inspector-header { padding: 12px 25px; background: rgba(0,0,0,0.6); border-bottom: 1px solid #222; display: flex; justify-content: space-between; align-items: center; }
+    .inspector-title { font-size: 18px; font-weight: bold; color: var(--wire-glow); letter-spacing: 1px; }
+
+    .inspector-body { padding: 15px 30px; display: flex; flex-direction: column; min-height: 80px; justify-content: center; }
+    .explanation { font-size: 15px; line-height: 1.6; color: #ddd; }
+    .explanation strong { color: var(--wire-glow); font-weight: bold; padding: 0 4px; }
+
+    .controls { padding: 12px; background: rgba(0,0,0,0.8); border-top: 1px solid #222; display: flex; justify-content: center; gap: 20px; }
+    button { padding: 10px 30px; background: #222; color: white; border: 1px solid #555; border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    button:hover { background: #444; }
+    button.primary { background: #0ea5e9; border: none; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+    button.primary:hover { background: #38bdf8; box-shadow: 0 0 20px rgba(14,165,233,0.6); }
+
+    .title-banner { position: absolute; top: 25px; left: 35px; z-index: 10; pointer-events: none; }
+    .title-banner h1 { margin: 0; font-size: 26px; font-weight: bold; color: #fff; text-shadow: 0 4px 10px #000; }
+    .title-banner h2 { margin: 6px 0 0 0; font-size: 13px; color: var(--wire-glow); letter-spacing: 3px; }
+
+    /* 控制面板 */
+    .top-controls {
+      position: absolute; top: 25px; right: 35px; z-index: 100;
+    }
+    .switch-btn {
+      padding: 8px 18px; background: rgba(56, 189, 248, 0.15); color: #7dd3fc;
+      border: 1px solid #0284c7; border-radius: 8px; font-size: 13px; font-weight: bold;
+      text-decoration: none; display: inline-flex; align-items: center; gap: 8px;
+      transition: 0.2s; box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
+    .switch-btn:hover {
+      background: var(--wire-glow); color: #fff; box-shadow: 0 0 15px rgba(56, 189, 248, 0.5);
+    }
+
+    /* 极致流体脉冲动画 (水流/能量激增效果) */
+    .path-flow { 
+      stroke-dasharray: 80, 120; /* 长度 80，间距 120，完美周期 200 */
+      animation: fluidFlow 1s linear infinite; 
+      stroke-linecap: round;
+      filter: blur(1.5px) drop-shadow(0 0 8px var(--wire-glow));
+    }
+    @keyframes fluidFlow { 
+      from { stroke-dashoffset: 200; } 
+      to { stroke-dashoffset: 0; } 
+    }
+  </style>
+</head>
+<body>
+
+  <div class="grid-bg"></div>
+  
+  <div class="title-banner">
+    <h1>复杂流向拓扑网络图 (FSM Mesh)</h1>
+    <h2>TRUE STATE MACHINE LOGIC VISUALIZER</h2>
+  </div>
+
+  <div class="top-controls">
+    <a href="animation_state_machine.html" class="switch-btn">切换至 角色动画状态机 ➡</a>
+  </div>
+
+  <svg id="wire-canvas"></svg>
+  
+  <div id="nodes-container">
+    <!-- 横向拉开间距，解决拥挤问题 -->
+    
+    <!-- Row 1: Top Loop (Y: 12%) -->
+    <div class="node" id="BREAK" style="left: 30%; top: 12%;">
+      <div class="node-header bg-break">正在休息<div class="pin right"></div><div class="pin left"></div><div class="pin bottom"></div></div>
+      <div class="node-body">体力耗尽打断工作。</div>
+    </div>
+    <div class="node" id="TASK_UPDATE" style="left: 65%; top: 12%;">
+      <div class="node-header bg-manager">任务实时变更<div class="pin left"></div><div class="pin bottom"></div></div>
+      <div class="node-body">遭遇Bug或需求变更。</div>
+    </div>
+
+    <!-- Row 2: Center Hub (Y: 35%) -->
+    <div class="node" id="IDLE" style="left: 15%; top: 35%;">
+      <div class="node-header bg-idle">在办公室待命<div class="pin right"></div><div class="pin left"></div><div class="pin top"></div><div class="pin bottom"></div></div>
+      <div class="node-body">基础态：游荡或空闲。</div>
+    </div>
+    <div class="node" id="WORKING" style="left: 45%; top: 35%;">
+      <div class="node-header bg-work">工作中<div class="pin right"></div><div class="pin left"></div><div class="pin top"></div><div class="pin bottom"></div></div>
+      <div class="node-body">执行产出，扣除体力。</div>
+    </div>
+    <div class="node" id="COMPLETED" style="left: 80%; top: 35%;">
+      <div class="node-header bg-work">完成任务<div class="pin left"></div><div class="pin bottom"></div></div>
+      <div class="node-body">进度 100%，交付产物。</div>
+    </div>
+
+    <!-- Row 3: Manager / Post-Meeting (Y: 52%) -->
+    <div class="node" id="RETURN_DESK" style="left: 45%; top: 52%;">
+      <div class="node-header bg-idle">返回工位<div class="pin left"></div><div class="pin top"></div><div class="pin right"></div></div>
+      <div class="node-body">基层员工寻路归位。</div>
+    </div>
+    <div class="node" id="ASSIGN_TASK" style="left: 70%; top: 52%;">
+      <div class="node-header bg-manager">安排任务中<div class="pin top"></div><div class="pin right"></div><div class="pin left"></div></div>
+      <div class="node-body">调度派发子任务。</div>
+    </div>
+    <div class="node" id="GEN_PRD" style="left: 90%; top: 52%;">
+      <div class="node-header bg-manager">主管输出 PRD<div class="pin top"></div><div class="pin bottom"></div><div class="pin left"></div></div>
+      <div class="node-body">总结提炼需求文档。</div>
+    </div>
+
+    <!-- Row 4: Meeting Loop (Y: 68%) -->
+    <div class="node" id="GO_MEETING" style="left: 10%; top: 68%;">
+      <div class="node-header bg-meet">前往会议<div class="pin top"></div><div class="pin right"></div></div>
+      <div class="node-body">强制打断，寻路中。</div>
+    </div>
+    <div class="node" id="ARR_MEETING" style="left: 30%; top: 68%;">
+      <div class="node-header bg-meet">到达会议室<div class="pin left"></div><div class="pin right"></div></div>
+      <div class="node-body">落座等待全员就绪。</div>
+    </div>
+    <div class="node" id="MEETING" style="left: 55%; top: 68%;">
+      <div class="node-header bg-meet">讨论中<div class="pin left"></div><div class="pin right"></div></div>
+      <div class="node-body">头脑风暴交锋。</div>
+    </div>
+    <div class="node" id="END_MEETING" style="left: 80%; top: 68%;">
+      <div class="node-header bg-meet">讨论结束<div class="pin left"></div><div class="pin top"></div><div class="pin right"></div></div>
+      <div class="node-body">会议解散，异构流转。</div>
+    </div>
+  </div>
+
+  <div id="labels-container"></div>
+
+  <!-- Inspector Panel -->
+  <div id="inspector-panel">
+    <div class="inspector-header">
+      <div class="inspector-title" id="current-step-title">FSM 逻辑流上演播</div>
+      <div style="font-size: 14px; color: #94a3b8; font-weight: bold;">流转拆解 <span id="step-counter">1/5</span></div>
+    </div>
+    <div class="inspector-body">
+      <div class="explanation" id="logic-explanation"></div>
+    </div>
+    <div class="controls">
+      <button id="btn-prev">⬅ 回溯</button>
+      <button class="primary" id="btn-next">查看下一个流转逻辑 ➡</button>
+    </div>
+  </div>
+
+  <script>
+    const connections = [
+      // 彻底解耦 Pin 点，防止双向线重叠。配置 t (0-1 的曲线比例) 与 X/Y 偏移来在初始渲染时错开标签
+      { id: "c1", from: "IDLE", fromPin: "top", to: "WORKING", toPin: "top", label: "当接收到 LLM 分配的初始开发任务时", t: 0.5, labelYOffset: -40 },
+      { id: "c2", from: "WORKING", fromPin: "bottom", to: "IDLE", toPin: "bottom", label: "当任务被强行取消，重归游荡态", t: 0.5, labelYOffset: 35 },
+      
+      { id: "c3", from: "WORKING", fromPin: "left", to: "BREAK", toPin: "right", label: "当精力值跌至 0，强行打断开发", t: 0.45, labelXOffset: 45, labelYOffset: -20 },
+      { id: "c4", from: "BREAK", fromPin: "bottom", to: "WORKING", toPin: "top", label: "当满血且身上 LLM 任务未完成时", t: 0.55, labelXOffset: -45, labelYOffset: 20 },
+      { id: "c5", from: "BREAK", fromPin: "left", to: "IDLE", toPin: "top", label: "当满血且暂无新开发任务时", t: 0.5, labelXOffset: -45, labelYOffset: -15 },
+      
+      { id: "c6", from: "WORKING", fromPin: "right", to: "TASK_UPDATE", toPin: "bottom", label: "当 LLM 实时下发新的动态任务名时", t: 0.65, labelXOffset: 45, labelYOffset: -15 },
+      { id: "c7", from: "TASK_UPDATE", fromPin: "left", to: "WORKING", toPin: "top", label: "当动态需求热更新完毕重返开发", t: 0.35, labelXOffset: -45, labelYOffset: 15 },
+      { id: "c8", from: "WORKING", fromPin: "right", to: "COMPLETED", toPin: "left", label: "当代码/美术进度达到 100% 时", t: 0.5, labelYOffset: -15 },
+      { id: "c9", from: "COMPLETED", fromPin: "bottom", to: "IDLE", toPin: "bottom", label: "当交付产物并重置状态后", t: 0.5, labelXOffset: 0, labelYOffset: 110 },
+
+      { id: "c10", from: "IDLE", fromPin: "bottom", to: "GO_MEETING", toPin: "top", label: "当主管发起紧急开会指令时", t: 0.4, labelXOffset: -50 },
+      { id: "c11", from: "WORKING", fromPin: "bottom", to: "GO_MEETING", toPin: "right", label: "强行打断：立刻放下手头开发去开会！", t: 0.6, labelXOffset: -40, labelYOffset: 40 },
+      { id: "c12", from: "BREAK", fromPin: "left", to: "GO_MEETING", toPin: "left", label: "强行打断：立刻起床去开会！", t: 0.5, labelXOffset: -90, labelYOffset: -20 },
+
+      { id: "c13", from: "GO_MEETING", fromPin: "right", to: "ARR_MEETING", toPin: "left", label: "当寻路系统抵达会议室座位时", t: 0.5, labelYOffset: -15 },
+      { id: "c14", from: "ARR_MEETING", fromPin: "right", to: "MEETING", toPin: "left", label: "当全员落座准备就绪时", t: 0.5, labelYOffset: -15 },
+      { id: "c15", from: "MEETING", fromPin: "right", to: "END_MEETING", toPin: "left", label: "当多智能体讨论得出最终共识时", t: 0.5, labelYOffset: -15 },
+      
+      { id: "c16", from: "END_MEETING", fromPin: "left", to: "RETURN_DESK", toPin: "right", label: "当会议结束，全员退场归位时", t: 0.5, labelYOffset: -15 },
+      
+      { id: "c17", from: "RETURN_DESK", fromPin: "top", to: "WORKING", toPin: "bottom", label: "落座后立刻根据 LLM 新任务展开开发", t: 0.5, labelXOffset: 45 },
+      
+      { id: "c18", from: "END_MEETING", fromPin: "top", to: "GEN_PRD", toPin: "bottom", label: "当主管级 Agent 开始整理纪要时", t: 0.5, labelXOffset: -10, labelYOffset: -30 },
+      { id: "c19", from: "GEN_PRD", fromPin: "left", to: "ASSIGN_TASK", toPin: "right", label: "当大模型结构化输出 PRD 完毕时", t: 0.5, labelYOffset: -15 },
+      { id: "c20", from: "ASSIGN_TASK", fromPin: "top", to: "WORKING", toPin: "right", label: "主管将 PRD 拆解并精准派发给员工", t: 0.5, labelXOffset: 45, labelYOffset: -20 },
+    ];
+
+    const steps = [
+      {
+        title: "第一步：完美契合项目底层的非线性 FSM 拓扑网",
+        activeNodes: [],
+        activeWires: [],
+        explanation: "我彻底理清了您整个项目的核心架构！<br>这不仅是一个状态机，更是<strong>与 LLM 深度绑定的动态任务调度引擎</strong>。<br>为了让您的蓝图极其清爽，我拉开了所有节点的间距，并纯手工打造了每一条贝塞尔曲线：现在所有双向关系（如工作与休息）都通过不同的 Pin 脚形成了完美的弧形回路，彻底消灭了线条重叠！<br>连线特效已经升级为高阶流体涌动，您将看到源源不断的数据驱动着整个虚拟公司的运转！"
+      },
+      {
+        title: "第二步：日常开发与体力消耗自调节环",
+        activeNodes: ["IDLE", "WORKING", "BREAK"],
+        activeWires: ["c1", "c2", "c3", "c4", "c5"],
+        explanation: "这是员工底层的自我调节循环。<br>当收到 LLM 初次分配的开发任务时，流体顺着上方的弧线涌入<strong>工作中</strong>。<br>如果在这期间体力归零，他会被迫打断开发，顺着左侧回路流向<strong>休息</strong>。最精妙的是他休息满血后的判断：如果身上的 LLM 任务没做完，水流就顺着底部回路继续涌入<strong>工作中</strong>；如果没任务了，才流回待命。<br>纯手工调教的回路连线确保了视觉上绝对的工业级水准！"
+      },
+      {
+        title: "第三步：基于 LLM 的敏捷需求热更新 (核心亮点)",
+        activeNodes: ["WORKING", "TASK_UPDATE", "COMPLETED", "IDLE"],
+        activeWires: ["c6", "c7", "c8", "c9"],
+        explanation: "这是您架构的绝对核心亮点：<strong>实时动态任务名变更！</strong><br>开发途中，如果大模型突然下发了新需求，能量流会瞬间涌向<strong>任务实时变更</strong>并从上方环回工作态继续开发！<br>当进度 100% 后，流向<strong>完成任务</strong>提交产物，并最终通过底部一个极其优雅的超级大回环流回待命中心。"
+      },
+      {
+        title: "第四步：“Any State” 强打断 —— 无条件拉起会议",
+        activeNodes: ["IDLE", "WORKING", "BREAK", "GO_MEETING"],
+        activeWires: ["c10", "c11", "c12"],
+        explanation: "当主管发起紧急开会指令时，触发了强大的 <strong>Any State Interrupt (全局硬打断)</strong>。<br>无论员工此刻是在睡觉满血、埋头敲代码、还是游荡待命，所有正常流转瞬间掐断！能量流沿着量身定制的无碰撞线路，把所有身份强行扯入<strong>前往会议</strong>节点。完美规避死锁并发问题。"
+      },
+      {
+        title: "第五步：会议解散与 LLM 任务的无缝衔接 (全员开发)",
+        activeNodes: ["END_MEETING", "RETURN_DESK", "WORKING", "GEN_PRD", "ASSIGN_TASK"],
+        activeWires: ["c13", "c14", "c15", "c16", "c17", "c18", "c19", "c20"],
+        explanation: "会议结束后，员工绝不是回座位傻傻待命！<br>1. 基层员工顺着连线走到<strong>返回工位</strong>后，会<strong>立刻根据 LLM 刚下发的新任务展开开发，水流直接向上涌向“工作中”</strong>！<br>2. 与此同时，主管 Agent 逆流而上，进入<strong>输出 PRD</strong>。生成 PRD 后，主管通过派发任务的专属长弧线，将任务精准液压般注入员工的工作序列中。<br>整个引擎高度统一，行云流水！"
+      }
+    ];
+
+    let currentStep = 0;
+    const wireCanvas = document.getElementById('wire-canvas');
+
+    function renderWires() {
+      wireCanvas.innerHTML = `
+        <defs>
+          <marker id="arrow-default" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 2 L 12 6 L 0 10 z" fill="rgba(255,255,255,0.3)" />
+          </marker>
+          <marker id="arrow-active" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+            <path d="M 0 1 L 12 6 L 0 11 z" fill="var(--wire-glow)" />
+          </marker>
+        </defs>
+      `;
+
+      // 每次重新计算连线时清空旧的 HTML 标签，防止 resize 时标签无限叠加
+      document.getElementById('labels-container').innerHTML = '';
+
+      connections.forEach(conn => {
+        const fromNode = document.getElementById(conn.from);
+        const toNode = document.getElementById(conn.to);
+        if(!fromNode || !toNode) return;
+
+        const start = getPinCoords(fromNode, conn.fromPin);
+        const end = getPinCoords(toNode, conn.toPin);
+
+        let cp1x = start.x, cp1y = start.y;
+        let cp2x = end.x, cp2y = end.y;
+
+        const distanceX = Math.abs(end.x - start.x);
+        const distanceY = Math.abs(end.y - start.y);
+        
+        // 纯手工精雕细琢的定制化闭环贝塞尔曲线
+        if (conn.id === "c9") { // COMPLETED to IDLE (巨型底部回环)
+          cp1x = start.x; cp1y = start.y + 120;
+          cp2x = end.x; cp2y = end.y + 120;
+        } else if (conn.id === "c1") { // IDLE to WORKING (顶部正向回环)
+          cp1x = start.x; cp1y = start.y - 80;
+          cp2x = end.x; cp2y = end.y - 80;
+        } else if (conn.id === "c2") { // WORKING to IDLE (底部反向回环)
+          cp1x = start.x; cp1y = start.y + 80;
+          cp2x = end.x; cp2y = end.y + 80;
+        } else if (conn.id === "c12") { // BREAK to GO_MEETING (巨型左侧规避环)
+          cp1x = start.x - 200; cp1y = start.y;
+          cp2x = end.x - 100; cp2y = end.y;
+        } else if (conn.id === "c11") { // WORKING to GO_MEETING (S型完美规避)
+          cp1x = start.x; cp1y = start.y + 80;
+          cp2x = end.x + 80; cp2y = end.y;
+        } else if (conn.id === "c18") { // END_MEETING to GEN_PRD
+          cp1x = start.x; cp1y = start.y - 80;
+          cp2x = end.x; cp2y = end.y + 80;
+        } else {
+          const tension = Math.max(60, Math.min(distanceX, distanceY) * 0.7 + 20);
+          if (conn.fromPin === 'right') cp1x += tension;
+          if (conn.fromPin === 'left') cp1x -= tension;
+          if (conn.fromPin === 'top') cp1y -= tension;
+          if (conn.fromPin === 'bottom') cp1y += tension;
+
+          if (conn.toPin === 'right') cp2x += tension;
+          if (conn.toPin === 'left') cp2x -= tension;
+          if (conn.toPin === 'top') cp2y -= tension;
+          if (conn.toPin === 'bottom') cp2y += tension;
+        }
+
+        const pathData = `M ${start.x} ${start.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${end.x} ${end.y}`;
+
+        // 管道底线 (微透玻璃质感)
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", pathData);
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", "var(--wire-color)");
+        path.setAttribute("stroke-width", "3");
+        path.setAttribute("marker-end", "url(#arrow-default)");
+        path.setAttribute("id", "wire-" + conn.id);
+        wireCanvas.appendChild(path);
+
+        // 流体能量线
+        const flowPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        flowPath.setAttribute("d", pathData);
+        flowPath.setAttribute("fill", "none");
+        flowPath.setAttribute("stroke", "var(--wire-glow)");
+        flowPath.setAttribute("stroke-width", "4");
+        flowPath.setAttribute("marker-end", "url(#arrow-active)");
+        flowPath.setAttribute("opacity", "0");
+        flowPath.setAttribute("id", "flow-" + conn.id);
+        flowPath.classList.add("path-flow");
+        wireCanvas.appendChild(flowPath);
+
+        // 文本标签
+        const label = document.createElement("div");
+        label.className = "wire-label";
+        label.id = "label-" + conn.id;
+        label.innerText = conn.label;
+        
+        // 支持自定义 t 比例定位
+        const t = conn.t !== undefined ? conn.t : 0.5;
+        let midX = Math.pow(1-t,3)*start.x + 3*Math.pow(1-t,2)*t*cp1x + 3*(1-t)*Math.pow(t,2)*cp2x + Math.pow(t,3)*end.x;
+        let midY = Math.pow(1-t,3)*start.y + 3*Math.pow(1-t,2)*t*cp1y + 3*(1-t)*Math.pow(t,2)*cp2y + Math.pow(t,3)*end.y;
+        
+        if (conn.labelXOffset) midX += conn.labelXOffset;
+        if (conn.labelYOffset) midY += conn.labelYOffset;
+
+        label.style.left = midX + "px";
+        label.style.top = midY + "px";
+        
+        // 存储基础计算坐标，供防避让引擎重置使用
+        label.dataset.baseLeft = midX;
+        label.dataset.baseTop = midY;
+        
+        document.getElementById('labels-container').appendChild(label);
+      });
+    }
+
+    function getPinCoords(node, pinDir) {
+      const rect = node.getBoundingClientRect();
+      const pin = node.querySelector('.pin.' + pinDir);
+      if (!pin) return { x: rect.left + rect.width/2, y: rect.top + rect.height/2 };
+      const pinRect = pin.getBoundingClientRect();
+      return { x: pinRect.left + pinRect.width / 2, y: pinRect.top + pinRect.height / 2 };
+    }
+
+    // 高级文本标签防重叠引擎：检测所有激活/可见的条件标签，并通过迭代位移自动避让
+    function resolveLabelCollisions() {
+      const labels = Array.from(document.querySelectorAll('.wire-label'));
+      // 仅对当前处于 active 状态的可见标签进行防碰撞计算
+      const visibleLabels = labels.filter(label => label.classList.contains('active'));
+
+      // 1. 重置为基础坐标
+      visibleLabels.forEach(label => {
+        if (label.dataset.baseLeft && label.dataset.baseTop) {
+          label.style.left = label.dataset.baseLeft + 'px';
+          label.style.top = label.dataset.baseTop + 'px';
+        }
+      });
+
+      if (visibleLabels.length <= 1) return;
+
+      const paddingX = 16; // 水平最小间距
+      const paddingY = 8;  // 垂直最小间距
+      let adjusted = true;
+      let iterations = 20; // 限制最大避让计算迭代次数，防止死循环
+
+      while (iterations > 0 && adjusted) {
+        adjusted = false;
+        for (let i = 0; i < visibleLabels.length; i++) {
+          for (let j = i + 1; j < visibleLabels.length; j++) {
+            const rect1 = visibleLabels[i].getBoundingClientRect();
+            const rect2 = visibleLabels[j].getBoundingClientRect();
+
+            // 检查边界重叠 (加入 padding 间距)
+            const overlapX = Math.min(rect1.right, rect2.right) - Math.max(rect1.left, rect2.left);
+            const overlapY = Math.min(rect1.bottom, rect2.bottom) - Math.max(rect1.top, rect2.top);
+
+            if (overlapX > -paddingX && overlapY > -paddingY) {
+              adjusted = true;
+
+              // 计算中心点向量，确定推开的相对方向
+              const c1x = rect1.left + rect1.width / 2;
+              const c1y = rect1.top + rect1.height / 2;
+              const c2x = rect2.left + rect2.width / 2;
+              const c2y = rect2.top + rect2.height / 2;
+
+              const dx = c1x - c2x;
+              const dy = c1y - c2y;
+
+              // 除非是极度平行的水平重叠，否则优先进行上下（垂直）推开，这更符合中文阅读排版
+              if (Math.abs(dy) > 5) {
+                const shiftY = (overlapY + paddingY) / 2;
+                const sign = dy >= 0 ? 1 : -1;
+                
+                const top1 = parseFloat(visibleLabels[i].style.top) || 0;
+                const top2 = parseFloat(visibleLabels[j].style.top) || 0;
+                
+                visibleLabels[i].style.top = (top1 + sign * shiftY) + 'px';
+                visibleLabels[j].style.top = (top2 - sign * shiftY) + 'px';
+              } else {
+                const shiftX = (overlapX + paddingX) / 2;
+                const sign = dx >= 0 ? 1 : -1;
+                
+                const left1 = parseFloat(visibleLabels[i].style.left) || 0;
+                const left2 = parseFloat(visibleLabels[j].style.left) || 0;
+                
+                visibleLabels[i].style.left = (left1 + sign * shiftX) + 'px';
+                visibleLabels[j].style.left = (left2 - sign * shiftX) + 'px';
+              }
+            }
+          }
+        }
+        iterations--;
+      }
+    }
+
+    function updateView() {
+      const step = steps[currentStep];
+
+      document.getElementById('current-step-title').innerText = step.title;
+      document.getElementById('step-counter').innerText = `${currentStep + 1}/${steps.length}`;
+      document.getElementById('logic-explanation').innerHTML = step.explanation;
+
+      // 隐藏所有
+      document.querySelectorAll('.node').forEach(n => n.classList.remove('active'));
+      document.querySelectorAll('#wire-canvas path[id^="wire-"]').forEach(p => {
+        p.setAttribute('stroke', 'var(--wire-color)');
+        p.style.opacity = "0.3"; // 保持玻璃管道可见
+      });
+      document.querySelectorAll('[id^="flow-"]').forEach(p => p.setAttribute('opacity', '0'));
+      document.querySelectorAll('.wire-label').forEach(l => {
+        l.classList.remove('active');
+      });
+
+      // 激活当前
+      step.activeNodes.forEach(nid => {
+        const node = document.getElementById(nid);
+        if (node) node.classList.add('active');
+      });
+
+      step.activeWires.forEach(wid => {
+        const flow = document.getElementById("flow-" + wid);
+        const label = document.getElementById("label-" + wid);
+        
+        if (flow) flow.setAttribute('opacity', '1');
+        if (label) label.classList.add('active');
+      });
+      
+      // 第一步全景展示特例
+      if (currentStep === 0) {
+          document.querySelectorAll('#wire-canvas path[id^="flow-"]').forEach(p => {
+              p.setAttribute('opacity', '0.6'); // 全景微亮水流
+          });
+      }
+
+      // 在更新 DOM 渲染、尺寸和 active 类完毕后，触发避让引擎
+      // 延迟 50ms 保证浏览器重绘计算尺寸完毕
+      setTimeout(resolveLabelCollisions, 50);
+    }
+
+    window.addEventListener('resize', () => {
+      renderWires();
+      updateView();
+    });
+
+    document.getElementById('btn-next').addEventListener('click', () => {
+      if (currentStep < steps.length - 1) currentStep++;
+      else currentStep = 0;
+      updateView();
+    });
+
+    document.getElementById('btn-prev').addEventListener('click', () => {
+      if (currentStep > 0) currentStep--;
+      updateView();
+    });
+
+    setTimeout(() => {
+      renderWires();
+      updateView();
+    }, 100);
+
+  </script>
+</body>
+</html>

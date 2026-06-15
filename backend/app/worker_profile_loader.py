@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from app.config import settings
 from app.memory import memory_store
@@ -40,6 +40,15 @@ def load_agent_profiles() -> dict[str, OfficeAgent]:
         agent = _load_agent_profile(path)
         agents[agent.worker_id] = agent
         memory_store.ensure_agent(agent.worker_id, agent.name, agent.role)
+        # 注册角色属性到 Core Memory，供 atmosphere 提示词使用
+        memory_store.register_agent(agent.worker_id, {
+            "name": agent.name,
+            "role": agent.role,
+            "personality": agent.personality,
+            "work_style": agent.work_style,
+            "communication_style": agent.communication_style,
+            "work_values": agent.work_values,
+        })
     return agents
 
 

@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>办公室模拟 - 状态机与架构思维导图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: #0f1117;
+    color: #e1e4e8;
+    padding: 40px;
+  }
+  h1 { text-align: center; font-size: 28px; margin-bottom: 8px; color: #58a6ff; }
+  .subtitle { text-align: center; color: #8b949e; font-size: 14px; margin-bottom: 36px; }
+
+  .grid { display: grid; gap: 24px; max-width: 1400px; margin: 0 auto; }
+
+  /* ===== 状态机图 ===== */
+  .fsm-section { background: #161b22; border-radius: 12px; padding: 28px; border: 1px solid #30363d; }
+  .section-title { font-size: 18px; font-weight: 700; color: #58a6ff; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
+  .section-title::before { content: ""; width: 4px; height: 20px; background: #58a6ff; border-radius: 2px; }
+
+  .fsm-container { position: relative; height: 420px; overflow: visible; }
+  .state-node {
+    position: absolute;
+    width: 130px; height: 130px;
+    border-radius: 16px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    transition: transform 0.2s;
+    cursor: default;
+  }
+  .state-node:hover { transform: scale(1.06); z-index: 10 !important; }
+  .state-icon { font-size: 28px; margin-bottom: 4px; }
+  .state-name { letter-spacing: 2px; }
+
+  .s-idle   { background: linear-gradient(135deg, #21262d, #30363d); border: 2px solid #484f58; color: #8b949e; top: 145px; left: 30px; z-index: 5; }
+  .s-work   { background: linear-gradient(135deg, #0d2818, #115c32); border: 2px solid #238636; color: #7ee787; top: 60px; left: 300px; z-index: 6; }
+  .s-break  { background: linear-gradient(135deg, #332200, #554700); border: 2px solid #9a6700; color: #e3b341; top: 230px; left: 300px; z-index: 6; }
+  .s-roam   { background: linear-gradient(135deg, #1b1233, #35215c); border: 2px solid #8957e5; color: #d2a8ff; top: 145px; left: 570px; z-index: 5; }
+
+  .arrow-label {
+    position: absolute;
+    font-size: 11px;
+    padding: 3px 7px;
+    border-radius: 6px;
+    white-space: nowrap;
+    font-family: "Microsoft YaHei", sans-serif;
+  }
+  .cond-normal  { background: rgba(88,166,255,0.15); color: #79c0ff; border: 1px solid rgba(88,166,255,0.25); }
+  .cond-random  { background: rgba(163,113,247,0.15); color: #d2a8ff; border: 1px solid rgba(163,113,247,0.25); }
+  .cond-force   { background: rgba(210,153,65,0.15); color: #e3b341; border: 1px solid rgba(210,153,65,0.25); }
+
+  /* SVG arrows */
+  svg.arrows { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 4; }
+  path.arrow-line { fill: none; stroke-width: 2; marker-end: url(#arrowhead); }
+  .arrow-idle-work   { stroke: #238636; }
+  .arrow-work-break  { stroke: #9a6700; }
+  .arrow-work-roam   { stroke: #8957e5; }
+  .arrow-break-work  { stroke: #238636; }
+  .arrow-roam-work   { stroke: #238636; }
+  .arrow-any-idle    { stroke: #484f58; stroke-dasharray: 6,4; }
+
+  /* ===== 数据流图 ===== */
+  .flow-section { background: #161b22; border-radius: 12px; padding: 28px; border: 1px solid #30363d; }
+  .flow-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 16px; }
+  .flow-col { display: flex; flex-direction: column; gap: 12px; }
+  .flow-block {
+    background: #0d1117; border-radius: 10px; padding: 16px;
+    border: 1px solid #30363d; font-size: 13px; line-height: 1.6;
+  }
+  .flow-block.engine  { border-left: 3px solid #238636; }
+  .flow-block.backend { border-left: 3px solid #58a6ff; }
+  .flow-block.shared  { border-left: 3px solid #8957e5; }
+  .block-title { font-weight: 700; font-size: 13px; margin-bottom: 8px; }
+  .engine-title  { color: #7ee787; }
+  .backend-title { color: #79c0ff; }
+  .shared-title  { color: #d2a8ff; }
+  .flow-item { color: #8b949e; padding-left: 12px; position: relative; }
+  .flow-item::before { content: "▸"; position: absolute; left: 0; color: #484f58; font-size: 11px; }
+  .flow-arrow { text-align: center; color: #484f58; font-size: 22px; line-height: 50px; }
+
+  /* ===== 对比表 ===== */
+  .compare-section { background: #161b22; border-radius: 12px; padding: 28px; border: 1px solid #30363d; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 16px; }
+  thead th { background: #21262d; color: #e1e4e8; padding: 10px 14px; text-align: left; font-weight: 600; border-bottom: 2px solid #30363d; }
+  tbody td { padding: 10px 14px; border-bottom: 1px solid #21262d; color: #8b949e; vertical-align: top; }
+  tbody tr:hover { background: rgba(136,192,240,0.04); }
+  .tag-old { background: rgba(248,81,73,0.15); color: #f85149; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+  .tag-new { background: rgba(63,185,80,0.15); color: #3fb950; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+
+  /* ===== 记忆层级 ===== */
+  .memory-section { background: #161b22; border-radius: 12px; padding: 28px; border: 1px solid #30363d; }
+  .memory-layers { display: flex; gap: 16px; margin-top: 16px; }
+  .mem-layer {
+    flex: 1; border-radius: 10px; padding: 18px; font-size: 13px;
+    position: relative; overflow: hidden;
+  }
+  .mem-core     { background: linear-gradient(135deg, #0d2818, #115c32); border: 1px solid #238636; }
+  .mem-working  { background: linear-gradient(135deg, #1b1233, #35215c); border: 1px solid #8957e5; }
+  .mem-archival { background: linear-gradient(135deg, #21262d, #30363d); border: 1px solid #484f58; opacity: 0.7; }
+  .mem-title { font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+  .mem-core .mem-title     { color: #7ee787; }
+  .mem-working .mem-title  { color: #d2a8ff; }
+  .mem-archival .mem-title { color: #8b949e; }
+  .mem-detail { color: rgba(225,228,232,0.75); font-size: 12px; line-height: 1.7; }
+  .mem-badge {
+    position: absolute; top: 10px; right: 10px;
+    font-size: 10px; padding: 2px 8px; border-radius: 4px;
+  }
+  .badge-always  { background: rgba(63,185,80,0.2); color: #3fb950; }
+  .badge-onneed { background: rgba(139,148,158,0.2); color: #8b949e; }
+  .badge-nope   { background: rgba(248,81,73,0.15); color: #f85149; }
+</style>
+</head>
+<body>
+
+<h1>🏢 办公室模拟 - 架构思维导图</h1>
+<p class="subtitle">Godot 本地状态机 + 后端 Atmosphere Service | 重构后 v2.0</p>
+
+<div class="grid">
+
+<!-- ==================== 第一部分：状态机 ==================== -->
+<div class="fsm-section">
+  <div class="section-title">一、WorkerStateMachine 四状态有限状态机</div>
+
+  <div class="fsm-container">
+    <!-- SVG 箭头层 -->
+    <svg class="arrows" viewBox="0 0 720 430">
+      <defs>
+        <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#484f58"/>
+        </marker>
+        <marker id="ah-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#238636"/>
+        </marker>
+        <marker id="ah-gold" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#9a6700"/>
+        </marker>
+        <marker id="ah-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#8957e5"/>
+        </marker>
+      </defs>
+      <!-- IDLE → WORKING -->
+      <path d="M160 180 Q220 125 295 120" class="arrow-line arrow-idle-work" marker-end="url(#ah-green)"/>
+      <!-- WORKING → BREAK (曲线向下) -->
+      <path d="M365 190 Q365 215 365 225" class="arrow-line arrow-work-break" marker-end="url(#ah-gold)"/>
+      <!-- WORKING → ROAMING (曲线向右) -->
+      <path d="M430 125 Q500 125 565 195" class="arrow-line arrow-work-roam" marker-end="url(#ah-purple)"/>
+      <!-- BREAK → WORKING (向上) -->
+      <path d="M330 235 Q280 170 340 150" class="arrow-line arrow-break-work" marker-end="url(#ah-green)"/>
+      <!-- ROAMING → WORKING (向左) -->
+      <path d="M565 205 Q480 155 435 145" class="arrow-line arrow-roam-work" marker-end="url(#ah-green)"/>
+      <!-- any → IDLE (虚线) -->
+      <path d="M300 290 Q180 310 110 250" class="arrow-line arrow-any-idle" marker-end="url(#arrowhead)"/>
+    </svg>
+
+    <!-- 节点 -->
+    <div class="state-node s-idle">
+      <span class="state-icon">⏸</span>
+      <span class="state-name">IDLE</span>
+      <span style="font-size:10px;color:#8b949e;margin-top:2px">待命/断网</span>
+    </div>
+
+    <div class="state-node s-work">
+      <span class="state-icon">💻</span>
+      <span class="state-name">WORKING</span>
+      <span style="font-size:10px;color:#7ee787;margin-top:2px">在工位工作</span>
+    </div>
+
+    <div class="state-node s-break">
+      <span class="state-icon">☕</span>
+      <span class="state-name">BREAK</span>
+      <span style="font-size:10px;color:#e3b341;margin-top:2px">休息区放松</span>
+    </div>
+
+    <div class="state-node s-roam">
+      <span class="state-icon">🚶</span>
+      <span class="state-name">ROAMING</span>
+      <span style="font-size:10px;color:#d2a8ff;margin-top:2px">闲逛走动</span>
+    </div>
+
+    <!-- 转换条件标签 -->
+    <div class="arrow-label cond-normal" style="top:118px;left:175px;">有任务 &amp;&amp; 在工位上</div>
+    <div class="arrow-label cond-random" style="top:198px;left:372px;">energy&lt;0.35 &amp;&amp; P&lt;15%</div>
+    <div class="arrow-label cond-random" style="top:128px;left:472px;">无任务 &amp;&amp; P&lt;8%</div>
+    <div class="arrow-label cond-normal" style="top:218px;left:265px;">energy&gt;0.85 或 定时到期</div>
+    <div class="arrow-label cond-normal" style="top:168px;left:480px;">到达工位 或 有新任务</div>
+    <div class="arrow-label cond-force" style="top:305px;left:165px;">force_idle() 断网时</div>
+  </div>
+
+  <p style="margin-top:16px;font-size:12px;color:#8b949e;line-height:1.8;">
+    <strong>全局约束：</strong>shared_away_count &lt;= 3（所有状态机实例共享的静态变量）<br>
+    <strong>能量衰减：</strong>WORKING energy-=0.008/s stress+=0.003/s | BREAK energy+=0.04/s stress-=0.02/s | ROAMING energy-=0.004/s<br>
+    <strong>tick() 返回：</strong>TickResult(target_type: "own_desk"/"idle_point"/"stay", state_changed: bool)
+  </p>
+</div>
+
+
+<!-- ==================== 第二部分：数据流 ==================== -->
+<div class="flow-section">
+  <div class="section-title">二、数据流：Godot 引擎 ↔ 后端 Atmosphere Service</div>
+  <div class="flow-grid">
+    <div class="flow-col">
+      <div class="flow-block engine">
+        <div class="block-title engine-title">🎮 Godot 引擎层（自主运转）</div>
+        <div class="flow-item">WorkerStateMachine — 四状态 FSM</div>
+        <div class="flow-item">NavigationServer2D 寻路</div>
+        <div class="flow-item">energy/stress _process(delta) 衰减</div>
+        <div class="flow-item">Area2D 检测寒暄触发</div>
+        <div class="flow-item">离座计数器 shared_away_count</div>
+        <div class="flow-item">开场先去工位就坐</div>
+        <div class="flow-item">断网时不卡死，继续本地循环</div>
+      </div>
+    </div>
+
+    <div class="flow-col" style="justify-content:center;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;padding-top:20px;">
+        <div class="flow-block shared" style="text-align:center;width:200px;">
+          <div class="block-title shared-title">📡 WebSocket</div>
+          <div class="flow-item" style="padding-left:0;">→ atmosphere_request (每10s)</div>
+          <div class="flow-item" style="padding-left:0;">→ boss_command</div>
+          <div class="flow-item" style="padding-left:0;">← say (台词+气泡)</div>
+          <div class="flow-item" style="padding-left:0;">← profile_update</div>
+          <div class="flow-item" style="padding-left:0;">← meeting_force_seat</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flow-col">
+      <div class="flow-block backend">
+        <div class="block-title backend-title">☁️ 后端 Atmosphere 层（纯氛围）</div>
+        <div class="flow-item">POST /atmosphere 接口</div>
+        <div class="flow-item">LLM 生成台词/状态/心情</div>
+        <div class="flow-item">8秒缓存避免重复调用</div>
+        <div class="flow-item">LLM 失败 → 规则模板降级</div>
+        <div class="flow-item">Core Memory (~400字角色)</div>
+        <div class="flow-item">Working Memory (~8条事件)</div>
+        <div class="flow-item">MeetingRuntime 会议调度</div>
+        <div class="flow-item">Boss Command 指令路由</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== 第三部分：前后对比 ==================== -->
+<div class="compare-section">
+  <div class="section-title">三、重构前后对比</div>
+  <table>
+    <thead>
+      <tr><th style="width:22%">维度</th><th style="width:39%">重构前</th><th style="width:39%">重构后</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>移动决策</strong></td>
+        <td><span class="tag-old">后端行为树</span> choose_rule_behavior() → resolve_decision() → Godot move_to_marker_id()</td>
+        <td><span class="tag-new">Godot 本地状态机</span> WorkerStateMachine.tick() → 直接选目标</td>
+      </tr>
+      <tr>
+        <td><strong>能量/压力</strong></td>
+        <td><span class="tag-old">后端每 tick 微调</span> _react_to_current_place()</td>
+        <td><span class="tag-new">Godot _process(delta)</span> 自动衰减/恢复曲线</td>
+      </tr>
+      <tr>
+        <td><strong>休息判断</strong></td>
+        <td><span class="tag-old">后端 should_take_break()</span> 行为树分支</td>
+        <td><span class="tag-new">Godot 状态机转换</span> energy &lt; 0.35 → BREAK</td>
+      </tr>
+      <tr>
+        <td><strong>寒暄触发</strong></td>
+        <td><span class="tag-old">O(n) 遍历 agent</span> _maybe_water_cooler_chat()</td>
+        <td><span class="tag-new">Godot Area2D</span> body_enter 物理检测</td>
+      </tr>
+      <tr>
+        <td><strong>LLM 用途</strong></td>
+        <td><span class="tag-old">全权决策</span> 移动+台词+状态+任务推进</td>
+        <td><span class="tag-new">只做氛围</span> 一句台词 + 一句状态文本</td>
+      </tr>
+      <tr>
+        <td><strong>调用频率</strong></td>
+        <td><span class="tag-old">~132次/分钟</span> 11人 × 每5秒 autonomy_tick</td>
+        <td><span class="tag-new">~11次/10秒</span> 批量请求 + 8秒缓存</td>
+      </tr>
+      <tr>
+        <td><strong>记忆上下文</strong></td>
+        <td><span class="tag-old">~2000+字</span> 4层堆叠（公司+长期+摘要+事件）</td>
+        <td><span class="tag-new">~500字</span> Core(~400) + Working(~8条)</td>
+      </tr>
+      <tr>
+        <td><strong>断网行为</strong></td>
+        <td><span class="tag-old">全员卡死</span> 无外部指令就不动</td>
+        <td><span class="tag-new">正常运转</span> 本地状态机接管一切</td>
+      </tr>
+      <tr>
+        <td><strong>worker_agent.py</strong></td>
+        <td><span class="tag-old">651行</span> 15+个决策方法</td>
+        <td><span class="tag-new">146行</span> 纯数据容器</td>
+      </tr>
+      <tr>
+        <td><strong>删除文件数</strong></td>
+        <td colspan="2" style="text-align:center;"><span class="tag-old">worker_behavior_tree / worker_intent / worker_rule_context / worker_decision_policy / worker_collaboration</span></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+
+<!-- ==================== 第四部分：记忆系统 ==================== -->
+<div class="memory-section">
+  <div class="section-title">四、两层记忆系统（MemGPT/Letta 风格）</div>
+  <div class="memory-layers">
+    <div class="mem-layer mem-core">
+      <span class="mem-badge badge-always">始终在上下文中</span>
+      <div class="mem-title">Core Memory (~400字)</div>
+      <div class="mem-detail">
+        • 身份：名字、岗位<br>
+        • 性格：personality 描述<br>
+        • 工作方式 / 沟通风格<br>
+        • 重视事项 work_values<br>
+        • 来源：agent profile 直接生成<br>
+        • 不读磁盘文件
+      </div>
+    </div>
+    <div class="mem-layer mem-working">
+      <span class="mem-badge badge-onneed">按需加载</span>
+      <div class="mem-title">Working Memory (~8条)</div>
+      <div class="mem-detail">
+        • 最近有价值的事件<br>
+        • 老板指令（提到自己的）<br>
+        • 任务变更 / 完成<br>
+        • 协作确认 / 风险发现<br>
+        • 来源：内存列表取最近 N 条<br>
+        • 过滤了闲聊/移动/idle
+      </div>
+    </div>
+    <div class="mem-layer mem-archival">
+      <span class="mem-badge badge-nope">不参与 LLM 上下文</span>
+      <div class="mem-title">Archival (events.jsonl)</div>
+      <div class="mem-detail">
+        • 完整事件流水日志<br>
+        • 继续写入但不读取给 LLM<br>
+        • 仅用于调试/人工查看<br>
+        • 写入前过滤低价值内容
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== 第五部分：代码质量评估 ==================== -->
+<div class="fsm-section" style="margin-top:0;">
+  <div class="section-title">五、代码质量评估</div>
+  <table>
+    <thead>
+      <tr><th>文件</th><th>行数</th><th>注释质量</th><th>架构清晰度</th><th>评价</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>worker_state_machine.gd</code></td>
+        <td>173</td>
+        <td>每个方法有中文注释说明用途和参数含义</td>
+        <td>单一职责：只管状态转换，不碰渲染/网络</td>
+        <td><span class="tag-new">清晰</span> 状态转换条件一目了然，tick() 返回值明确</td>
+      </tr>
+      <tr>
+        <td><code>demo_worker.gd</code></td>
+        <td>655</td>
+        <td>关键逻辑都有中文注释解释"为什么这么做"</td>
+        <td>双模式：external_decision(后端驱动) / local_fsm(本地状态机)</td>
+        <td><span class="tag-new">良好</span> 外部接口(move_to/visit/force_seat)保留完整</td>
+      </tr>
+      <tr>
+        <td><code>office_demo.gd</code></td>
+        <td>~650</td>
+        <td>atmosphere_timer 和命令处理有注释</td>
+        <td>精简为：say/profile_update/meeting 三类处理</td>
+        <td><span class="tag-new">清晰</span> move_to 只走 meeting/force_seat 分支</td>
+      </tr>
+      <tr>
+        <td><code>atmosphere_service.py</code></td>
+        <td>~200</td>
+        <td>每个方法有 docstring + 中文注释</td>
+        <td>单入口 generate() → 缓存 → LLM → 降级</td>
+        <td><span class="tag-new">简洁</span> 职责单一，降级链路完整</td>
+      </tr>
+      <tr>
+        <td><code>memory.py</code></td>
+        <td>~280</td>
+        <td>build_context 有分层说明注释</td>
+        <td>Core(属性生成) + Working(内存列表) + Archival(仅写)</td>
+        <td><span class="tag-new">合理</span> 写入过滤规则清晰可维护</td>
+      </tr>
+      <tr>
+        <td><code>worker_agent.py</code></td>
+        <td>146</td>
+        <td>类级 docstring 说明定位</td>
+        <td>纯数据容器：snapshot/remember/directive</td>
+        <td><span class="tag-new">极简</span> 从 651 行砍到 146 行，零决策逻辑</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+</div><!-- end grid -->
+
+</body>
+</html>

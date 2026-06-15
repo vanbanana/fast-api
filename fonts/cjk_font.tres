@@ -1,0 +1,17 @@
+[gd_resource type="FontFile" format=3 uid="uid://b3xc3bn2qyqw1"]
+
+[ext_resource type="FontFile" path="res://fonts/simhei.ttf" id="1"]
+
+[resource]
+data = ExtResource("1")
+antialiasing = 1
+disable_embedded_bitmaps = false
+force_autohinter = false
+hinting = 1
+multichannel_signed_distance_field = true
+msdf_pixel_range = 8
+msdf_size = 48
+oversampling = 0.0
+allow_system_fallback = true
+compress = false
+preload = PackedStringArray["4E00-9FFF", "3000-303F", "FF00-FF60", "0020-007E"]

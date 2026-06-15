@@ -1,15 +1,17 @@
-﻿from time import time
+from time import time
 
 import asyncio
+import logging
 
 from app.domain import BossDirective, CompanyProject, OfficeTargets
-from app.meeting_autogen import MeetingParticipant, run_round_robin_meeting
-from app.meeting_session import MeetingSession
+from app.llm_client import llm_client
+from app.meeting_session import MeetingSession, MeetingPhase
 from app.planning_service import ProjectPlanningService
 from app.schemas import AgentCommand, WorkerEvent
 from app.worker_agent import OfficeAgent
 from app.worker_llm_decision import clean_visible_text
-from app.worker_state import WorkerState
+
+logger = logging.getLogger(__name__)
 
 
 class MeetingRuntime:
@@ -38,7 +40,13 @@ class MeetingRuntime:
         directive.target_worker_ids = self._select_meeting_workers(directive)
         self._assign_meeting_seats(directive.target_worker_ids)
         self.active_session = self._create_meeting_session(directive)
-        self._prefetch_meeting_turns(self.active_session)
+        # 保存参会人当前工作状态（中断恢复）
+        for worker_id in directive.target_worker_ids[:8]:
+            agent = self.agents.get(worker_id)
+            if agent and agent.active_task_id:
+                agent.interrupted_task_id = agent.active_task_id
+                agent.interrupted_focus_task = agent.focus_task
+                agent.active_task_id = ""
         return self._meeting_move_commands(self.active_session)
 
     async def handle_event(self, event: WorkerEvent) -> list[AgentCommand]:
@@ -52,7 +60,7 @@ class MeetingRuntime:
 
     def locks_worker(self, worker_id: str) -> bool:
         session = self.active_session
-        return bool(session and worker_id in session.participant_ids)
+        return bool(session and not session.is_finished() and worker_id in session.participant_ids)
 
     def wait_command(self, worker_id: str) -> AgentCommand:
         return self._meeting_wait_command(worker_id)
@@ -76,12 +84,16 @@ class MeetingRuntime:
                 agent.focus_task = directive.text
                 agent.status = "去会议室"
                 agent.mood = "准备讨论"
+
+        # 主管默认为第一个参会人（通常是 worker1/项目经理）
+        lead_id = list(seats_by_worker.keys())[0] if seats_by_worker else ""
+
         return MeetingSession(
             session_id=f"meeting-{int(time())}",
             topic=directive.text,
             participant_ids=list(seats_by_worker.keys()),
             seats_by_worker=seats_by_worker,
-            max_turns=min(12, max(6, len(seats_by_worker) + 2)),
+            lead_worker_id=lead_id,
         )
     
     def _meeting_move_commands(self, session: MeetingSession) -> list[AgentCommand]:
@@ -114,21 +126,78 @@ class MeetingRuntime:
         session = self.active_session
         if session is None:
             return []
-    
+
+        # --- 阶段 1：有人到达座位 ---
         if event.type == "worker_arrived":
             session.mark_arrived(event.worker_id, event.target_id or "")
-            if session.is_ready() and not session.is_started:
-                session.is_started = True
-                session.pending_turns = await self._get_prefetched_meeting_turns(session)
-                return [await self._next_meeting_say_command(session)]
-            return []
-    
-        if event.type == "meeting_say_done" and session.is_started:
-            if session.has_more_turns():
-                return [await self._next_meeting_say_command(session)]
-            return await self._finish_meeting(session)
-    
+            if session.is_ready() and not session.is_discussing():
+                # 所有人到齐 → 进入讨论阶段，生成第一轮发言
+                session.start_discussion()
+                return [await self._generate_next_turn(session)]
+            # 还没到齐：给已到达的人发"已落座"状态
+            return [self._seated_status_command(event.worker_id, session)]
+
+        # --- 阶段 2：一轮发言结束 ---
+        if event.type == "meeting_say_done":
+            # === 关闭阶段：主管先出PRD，再等大家确认 ===
+            if session.is_closing():
+                # === 主管 PRD 两阶段加载 ===
+                if not session.closing_prd_said:
+                    if session.lead_prd_pending:
+                        # Phase 2: 主管刚说完"正在整理..." → 调用 LLM 生成 PRD
+                        if event.worker_id == session.lead_worker_id:
+                            return [await self._generate_next_ack(session, session.lead_worker_id)]
+                        return [self._meeting_wait_command(event.worker_id)]
+                    else:
+                        # Phase 1: 主管刚开始 → 先显示"正在整理..." 不调 LLM
+                        if event.worker_id == session.lead_worker_id:
+                            return [await self._generate_next_ack(session, session.lead_worker_id)]
+                        return [self._meeting_wait_command(event.worker_id)]
+
+                # === 主管 PRD 已出 → 让其他人回复"收到" ===
+                if event.worker_id != session.lead_worker_id:
+                    session.mark_acknowledged(event.worker_id)
+                if session.all_acknowledged():
+                    return await self._finish_meeting(session)
+                pending = session.pending_ack_ids()
+                if pending:
+                    return [await self._generate_next_ack(session, pending[0])]
+                return await self._finish_meeting(session)
+
+            # === 讨论阶段：正常轮转 ===
+            if session.is_discussing():
+                if session.has_more_turns() and not session.is_finished():
+                    return [await self._generate_next_turn(session)]
+                # 超过 max_turns → 进入关闭阶段（不是直接结束！让主管出PRD）
+                logger.info("[MEETING] 达到讨论轮次上限(%d)，进入PRD总结阶段", session.max_turns)
+                session.start_closing()
+                # 主管输出 PRD 总结
+                lead_id = session.lead_worker_id
+                if lead_id:
+                    return [await self._generate_next_ack(session, lead_id)]
+                return await self._finish_meeting(session)
+
         return []
+
+    def _seated_status_command(self, worker_id: str, session: MeetingSession) -> AgentCommand:
+        """已落座状态命令（气泡显示 + 状态更新）。"""
+        agent = self.agents.get(worker_id)
+        if agent:
+            agent.status = "已落座"
+        payload = (agent.snapshot().model_dump() if agent else {})
+        payload["decision_source"] = "meeting_seated"
+        payload["travel_mode"] = "meeting"
+        payload["meeting_session_id"] = session.session_id
+        payload["meeting_topic"] = session.topic
+        name = agent.name if agent else worker_id
+        return AgentCommand(
+            worker_id=worker_id,
+            action="status",
+            say="",
+            status="已落座",
+            display_name=name,
+            payload=payload,
+        )
     
     def _meeting_consumes_event(self, event: WorkerEvent) -> bool:
         session = self.active_session
@@ -139,13 +208,6 @@ class MeetingRuntime:
         if event.type != "worker_arrived":
             return False
         return event.worker_id in session.participant_ids and event.target_id == session.seat_for(event.worker_id)
-    
-    def _is_meeting_event(self, event: WorkerEvent) -> bool:
-        return event.type in ["worker_arrived", "meeting_say_done"]
-    
-    def _is_worker_locked_in_meeting(self, worker_id: str) -> bool:
-        session = self.active_session
-        return bool(session and worker_id in session.participant_ids)
     
     def _meeting_wait_command(self, worker_id: str) -> AgentCommand:
         agent = self.agents.get(worker_id)
@@ -163,30 +225,167 @@ class MeetingRuntime:
         payload["meeting_topic"] = session.topic
         return AgentCommand(worker_id=worker_id, action="move_to", target_id=seat_id, say="", payload=payload)
     
-    async def _next_meeting_say_command(self, session: MeetingSession) -> AgentCommand:
-        turn = session.pop_turn()
-        if not turn:
-            return AgentCommand(worker_id="office", action="idle", say="会议暂时没有新的发言。")
-        speaker_id = str(turn.get("worker_id", ""))
-        agent = self.agents[speaker_id]
-        reply = str(turn.get("text", ""))
-        reply = clean_visible_text(reply)
-        agent.status = "会议发言"
-        agent.focus_task = session.topic
+    async def _generate_next_turn(self, session: MeetingSession) -> AgentCommand:
+        """逐轮调用 LLM 生成会议发言（function calling）。
+
+        如果 LLM 返回空，自动跳到下一个人重试（最多跳过全员一轮）。
+        连续全部空回复则强制结束会议。
+        """
+        max_retries = len(session.participant_ids) * 2  # 最多绕两圈
+        for _ in range(max_retries):
+            speaker_id = session.next_speaker_id()
+            agent = self.agents.get(speaker_id)
+            if not agent:
+                session._bump_turn()  # 跳过无效 speaker
+                continue
+
+            roster = "、".join(
+                "%s/%s" % (self.agents[wid].name, self.agents[wid].role)
+                for wid in session.participant_ids if wid in self.agents
+            )
+
+            reply, done, prd_point = await llm_client.generate_meeting_turn(
+                speaker_name=agent.name,
+                speaker_role=agent.role,
+                topic=session.topic,
+                roster=roster,
+                transcript_summary=session.get_transcript_summary(),
+                turn_number=session.current_turn,
+                is_lead=session.is_lead(speaker_id),
+            )
+
+            if not reply:
+                # LLM 空回复 → 跳过这个人，继续下一位
+                session._bump_turn()
+                logger.warning("[MEETING] LLM 空回复，跳过 %s (turn=%d/%d)",
+                               agent.name, session.current_turn, session.max_turns)
+                continue
+
+            # 记录本轮发言
+            session.record_turn(speaker_id, agent.name, reply, done, prd_point)
+
+            # 如果主管提议结束 → 进入关闭阶段（不直接结束！）
+            if done and session.is_lead(speaker_id):
+                session.start_closing()
+                logger.info("[MEETING] 主管 %s 提议结束，进入PRD总结阶段",
+                            agent.name)
+
+            reply = clean_visible_text(reply)
+            # 关闭阶段：主管的发言要带上完整 PRD 总结
+            if session.is_closing() and session.is_lead(speaker_id) and session.prd_final:
+                closing_suffix = "\n【会议结论/任务分配】%s" % (session.prd_final[:150],)
+                if closing_suffix not in reply:
+                    reply = reply + closing_suffix
+                agent.status = "总结会议结论"
+            else:
+                agent.status = ""  # 清掉"已落座"等旧状态
+            agent.focus_task = session.topic
+            payload = agent.snapshot().model_dump()
+            payload["display"] = "speech"
+            payload["meeting_session_id"] = session.session_id
+            payload["meeting_topic"] = session.topic
+            payload["meeting_turn"] = session.current_turn
+
+            return AgentCommand(
+                worker_id=speaker_id,
+                action="say",
+                say="%s：%s" % (agent.name, reply),
+                payload=payload,
+            )
+
+        # 全部重试都失败 → 强制结束会议
+        logger.warning("[MEETING] 连续 %d 次空回复，强制结束会议", max_retries)
+        session.finish()
+        return await self._finish_meeting(session)
+
+    async def _generate_next_ack(self, session: MeetingSession, ack_worker_id: str) -> AgentCommand:
+        """关闭阶段：生成参会人的回复。主管输出PRD总结，其他人回复'收到'。"""
+        agent = self.agents.get(ack_worker_id)
+        if not agent:
+            session.mark_acknowledged(ack_worker_id)
+            pending = session.pending_ack_ids()
+            if pending:
+                return await self._generate_next_ack(session, pending[0])
+            return await self._finish_meeting(session)
+
+        # === 主管：两阶段 PRD 生成 ===
+        if ack_worker_id == session.lead_worker_id and not session.closing_prd_said:
+            if not session.lead_prd_pending:
+                # Phase 1: 显示"正在整理..."，不调 LLM，等前端播完再回来
+                session.lead_prd_pending = True
+                agent.status = "整理内容中..."
+                payload = agent.snapshot().model_dump()
+                payload["display"] = "speech"
+                payload["meeting_session_id"] = session.session_id
+                payload["meeting_topic"] = session.topic
+                logger.info("[MEETING] %s 开始整理会议结论...", agent.name)
+                return AgentCommand(
+                    worker_id=ack_worker_id,
+                    action="say",
+                    say="%s：正在整理会议结论..." % agent.name,
+                    payload=payload,
+                )
+            else:
+                # Phase 2: 调用 LLM 生成详细 PRD
+                logger.info("[MEETING] %s 调用LLM生成PRD总结...", agent.name)
+                prd_text = await llm_client.generate_meeting_prd_summary(
+                    lead_name=agent.name,
+                    topic=session.topic,
+                    full_transcript="\n".join(
+                        "%s: %s" % (m["speaker"], m["text"])
+                        for m in session.transcript
+                    ),
+                )
+                if prd_text:
+                    session.prd_final = prd_text
+                else:
+                    session.prd_final = "讨论结论：%s" % session.topic
+                session.closing_prd_said = True
+                session.lead_prd_pending = False
+                agent.status = "总结完成"
+                payload = agent.snapshot().model_dump()
+                payload["display"] = "speech"
+                payload["meeting_session_id"] = session.session_id
+                payload["meeting_topic"] = session.topic
+
+                logger.info("[MEETING] %s 输出PRD总结(%d字)", agent.name, len(session.prd_final) if session.prd_final else 0)
+
+                return AgentCommand(
+                    worker_id=ack_worker_id,
+                    action="say",
+                    say="%s：好，大家推进吧，PRD已同步到任务看板。" % agent.name,
+                    payload=payload,
+                )
+
+        # === 其他员工：回复"收到" ===
+        import random
+        ack_phrases = ["收到", "好的", "明白", "没问题，我去推进"]
+        ack_text = random.choice(ack_phrases)
+        session.mark_acknowledged(ack_worker_id)
+        agent.status = "确认收到任务"
         payload = agent.snapshot().model_dump()
         payload["display"] = "speech"
         payload["meeting_session_id"] = session.session_id
         payload["meeting_topic"] = session.topic
-        payload["meeting_turn"] = len(session.transcript)
-        payload["meeting_transcript"] = session.transcript[-8:]
+
+        logger.info("[MEETING] %s: %s (收到确认 %d/%d)",
+                    agent.name, ack_text,
+                    len(session.acknowledged_ids),
+                    len(session.participant_ids) - 1)
+
         return AgentCommand(
-            worker_id=speaker_id,
+            worker_id=ack_worker_id,
             action="say",
-            say=f"{agent.name}：{reply}",
+            say="%s：%s" % (agent.name, ack_text),
             payload=payload,
         )
+
+    def _empty_turn_command(self, session: MeetingSession) -> AgentCommand:
+        """LLM 失败时的空命令。"""
+        return AgentCommand(worker_id="office", action="idle", say="")
     
     async def _finish_meeting(self, session: MeetingSession) -> list[AgentCommand]:
+        session.finish()
         directive = BossDirective(
             text=session.topic,
             priority=3,
@@ -201,110 +400,73 @@ class MeetingRuntime:
             task = assigned_tasks.get(worker_id)
             if task:
                 agent.apply_directive(directive, task)
+            # 恢复之前被中断的任务（如果有）
+            if agent.interrupted_task_id and not task:
+                agent.active_task_id = agent.interrupted_task_id
+                agent.focus_task = agent.interrupted_focus_task or agent.focus_task
+                agent.status = "回到原任务继续"
+                agent.remember(f"会议结束，恢复原任务:{agent.focus_task}")
+            elif task:
+                agent.status = "执行会议分配的新任务"
+            agent.interrupted_task_id = ""
+            agent.interrupted_focus_task = ""
             agent.assigned_meeting_seat = ""
-            agent.fsm.force(WorkerState.WORKING)
-            agent.status = "会议结束，回工位开工"
+            # 确定回工位后的状态文字（前端据此判断是否显示绿色）
+            if task:
+                agent.status = "工作中"
+                agent.focus_task = task.title
+            elif agent.active_task_id:
+                agent.status = "工作中"
+            else:
+                agent.status = "会议结束，回工位开工"
             agent.mood = "明确下一步"
             desk_id = self.targets.own_desk(worker_id)
             if not desk_id:
                 continue
             payload = agent.snapshot().model_dump()
-            payload["travel_mode"] = "normal"
+            payload["travel_mode"] = "meeting_finished"
             payload["decision_source"] = "meeting_finished"
             payload["meeting_session_id"] = session.session_id
             payload["meeting_topic"] = session.topic
+            # 附带 PRD 总结（如果有）
+            if session.prd_final:
+                payload["prd_summary"] = session.prd_final
             payload["work_context"] = {
-                "intent": "会议结束，回本人固定工位推进分配任务",
-                "work_update": task.title if task else f"整理会议结论：{session.topic}",
+                "intent": "会议结束，回本人固定工位开始工作",
+                "work_update": task.title if task else f"推进任务：{session.topic}",
                 "risk_note": "",
                 "needs_help_from": "",
                 "confirmation_question": "",
                 "confidence": 0.9,
             }
+            # 主管简洁收尾，其他人按任务回复
+            if session.prd_final and worker_id == session.lead_worker_id:
+                say_text = "%s：好，大家回去推进吧，PRD已同步到任务看板。" % (agent.name,)
+            elif task:
+                say_text = "%s：收到，我去搞%s。" % (agent.name, task.title[:20])
+            else:
+                say_text = "%s：好，回工位开工。" % (agent.name,)
             commands.append(AgentCommand(
                 worker_id=worker_id,
                 action="move_to",
                 target_id=desk_id,
-                say=f"{agent.name}：会议结束，我回工位整理任务。",
+                say=say_text,
                 payload=payload,
             ))
         self.active_session = None
+        # 推送任务列表更新到前端手机UI
+        commands.append(AgentCommand(
+            worker_id="office",
+            action="task_update",
+            say="",
+            payload={
+                "tasks": [t.snapshot() for t in self.company.tasks.values()],
+                "prd_summary": session.prd_final or "",
+                "meeting_topic": session.topic,
+            },
+        ))
         return commands
 
-    def _prefetch_meeting_turns(self, session: MeetingSession) -> None:
-        """员工走向会议室时就开始请求会议文本，入座后尽量直接播放。"""
-        if session.turns_task:
-            return
-        try:
-            session.turns_task = asyncio.create_task(self._build_meeting_turns(session))
-        except RuntimeError:
-            session.turns_task = None
-
-    async def _get_prefetched_meeting_turns(self, session: MeetingSession) -> list[dict[str, str]]:
-        task = session.turns_task
-        if isinstance(task, asyncio.Task):
-            try:
-                turns = await task
-            except Exception:
-                turns = []
-            if turns:
-                return turns
-        return await self._build_meeting_turns(session)
-    
-    async def _build_meeting_turns(self, session: MeetingSession) -> list[dict[str, str]]:
-        participants = [
-            MeetingParticipant(
-                worker_id=worker_id,
-                name=self.agents[worker_id].name,
-                role=self.agents[worker_id].role,
-                prompt=self.agents[worker_id].roleplay_prompt(),
-            )
-            for worker_id in session.participant_ids
-            if worker_id in self.agents
-        ]
-        try:
-            turns = await run_round_robin_meeting(
-                topic=session.topic,
-                participants=participants,
-                max_turns=session.max_turns,
-            )
-        except Exception:
-            turns = []
-        if turns:
-            return turns
-        return [
-            {
-                "worker_id": worker_id,
-                "speaker": self.agents[worker_id].name,
-                "text": self._fallback_meeting_reply(self.agents[worker_id], session),
-            }
-            for worker_id in session.participant_ids
-            if worker_id in self.agents
-        ][: session.max_turns]
-    
-    def _fallback_meeting_reply(self, agent: OfficeAgent, session: MeetingSession) -> str:
-        topic = self._meeting_topic_label(session.topic)
-        if "产品" in agent.role:
-            return f"我先把{topic}的用户场景和验收口径列出来。"
-        if "项目经理" in agent.role:
-            return f"先定目标、负责人和时间点，别一上来就散。"
-        if "后端" in agent.role or "架构" in agent.role:
-            return f"我关注接口边界、数据结构和上线风险。"
-        if "前端" in agent.role or "UI" in agent.role:
-            return f"我需要明确页面状态和交互流程。"
-        if "测试" in agent.role:
-            return f"我会补复现路径、验收标准和回归范围。"
-        if "数据" in agent.role:
-            return f"要先定义指标，不然上线后没法判断效果。"
-        return f"我先听大家结论，再补我这边能做的事。"
-    
-    def _meeting_topic_label(self, topic: str) -> str:
-        cleaned = topic
-        for word in ["去会议室", "开会", "会议", "讨论一下", "讨论", "聊一下", "碰一下", "问题"]:
-            cleaned = cleaned.replace(word, "")
-        cleaned = cleaned.strip(" ：，。")
-        return cleaned or "这个项目"
-    
     def _select_meeting_workers(self, directive: BossDirective) -> list[str]:
         if directive.target_worker_ids:
             return directive.target_worker_ids[:8]
@@ -357,7 +519,6 @@ class MeetingRuntime:
         for index, worker_id in enumerate(worker_ids[:8]):
             if worker_id in self.agents and index < len(ordered_seats):
                 self.agents[worker_id].assigned_meeting_seat = ordered_seats[index]
-                self.agents[worker_id].fsm.force(WorkerState.MEETING)
     
     
     

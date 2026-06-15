@@ -47,6 +47,7 @@ class AgentMemoryStore:
         self.company_dir = self.root / "company"
         self.global_file = self.company_dir / "company_memory.md"
         self.agents_dir = self.root / "agents"
+        self._agents: dict[str, dict[str, str | list[str]]] = {}
         self.root.mkdir(parents=True, exist_ok=True)
         self.company_dir.mkdir(parents=True, exist_ok=True)
         self.agents_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +90,10 @@ class AgentMemoryStore:
         if not events_file.exists():
             events_file.write_text("", encoding="utf-8")
 
+    def register_agent(self, worker_id: str, profile: dict[str, str | list[str]]) -> None:
+        """注册 agent 属性到内存字典，供 build_context 的 Core Memory 使用。"""
+        self._agents[worker_id] = dict(profile)
+
     def remember(self, worker_id: str, text: str, kind: str = "event") -> None:
         text = self._normalize_memory_text(text)
         if not worker_id or not text:
@@ -102,33 +107,57 @@ class AgentMemoryStore:
         with self._events_file(worker_id).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event.model_dump(), ensure_ascii=False) + "\n")
         self._write_recent_markdown(worker_id)
-        self.compact_if_needed(worker_id)
 
     def should_store(self, text: str) -> bool:
-        text = self._normalize_memory_text(text)
-        if not text or self._is_debug_memory(text):
+        """写入前过滤：只存对'未来决策有影响'的信息。"""
+        if not text or len(text.strip()) < 4:
             return False
-        if self._is_low_value_memory(text):
-            return False
+        skip_prefixes = [
+            "规则决策:", "茶水间闲聊:", "在工位整理状态",
+            "短暂休息恢复", "留在本人固定工位", "继续处理",
+            "暂停移动", "自主循环达到上限", "整理记忆",
+        ]
+        text_stripped = text.strip()
+        for prefix in skip_prefixes:
+            if text_stripped.startswith(prefix):
+                return False
         return True
 
-    def build_context(self, worker_id: str, query: str) -> str:
-        """给 LLM 的压缩上下文，只放摘要、长期事实和少量相关近期事件。"""
+    def build_context(self, worker_id: str, query: str = "") -> str:
+        """给 LLM 的上下文：Core Memory（始终在）+ Working Memory（最近有价值事件）。
+
+        Core Memory 从 agent profile 直接生成，不读磁盘文件。
+        Working Memory 从内存列表取最近 N 条，不读 JSONL。
+        Archival（events.jsonl）不参与上下文组装。
+        """
         self.ensure_agent(worker_id, worker_id, "员工")
-        global_memory = self._read_text(self.global_file, 1200)
-        agent_memory = self._read_text(self._agent_dir(worker_id) / "long_term_memory.md", 1200)
-        summary = self._read_text(self._agent_dir(worker_id) / "summary.md", 1400)
-        events = self._select_events(worker_id, query, settings.memory_recent_events)
-        event_lines = "\n".join(f"- [{item.get('kind', 'event')}] {item.get('text', '')}" for item in events)
+
+        # Core Memory：从 agent 属性生成（~400字）
+        agent = self._agents.get(worker_id)
+        if agent:
+            core_lines = [
+                f"身份：{agent.get('name', '?')}，{agent.get('role', '?')}",
+                f"性格：{agent.get('personality', '?')}",
+                f"工作方式：{agent.get('work_style', '?')}",
+                f"沟通风格：{agent.get('communication_style', '?')}",
+                f"重视：{'、'.join(agent.get('work_values', []))}",
+            ]
+            # 加入长期记忆文件的补充信息（如果有的话）
+            lt_mem = self._read_text(self._agent_dir(worker_id) / "long_term_memory.md", 400)
+            if lt_mem and lt_mem != f"# {agent.get('name', '?')}":
+                core_lines.append(f"个人档案补充：{lt_mem[:300]}")
+            core_memory = "\n".join(core_lines)
+        else:
+            core_memory = "暂无角色档案。"
+
+        # Working Memory：从内存列表取最近有价值的事件（不读 JSONL）
+        events = self._read_events(worker_id)
+        valuable_events = [e for e in events[-12:] if self._is_valuable_event(e)]
+        event_lines = "\n".join(f"- {e.get('text', '')}" for e in valuable_events[-6:])
+
         return (
-            "【公司共享记忆】\n"
-            f"{global_memory}\n\n"
-            "【员工长期记忆】\n"
-            f"{agent_memory}\n\n"
-            "【压缩历史摘要】\n"
-            f"{summary}\n\n"
-            "【相关近期事件】\n"
-            f"{event_lines or '暂无相关近期事件。'}"
+            f"【你的角色】\n{core_memory}\n\n"
+            f"【近期重要事件】\n{event_lines or '暂无特别事件。'}"
         )
 
     def display_memory(self, worker_id: str, limit: int = 6) -> list[str]:
@@ -143,42 +172,28 @@ class AgentMemoryStore:
                 break
         return list(reversed(visible))
 
-    def compact_if_needed(self, worker_id: str) -> None:
-        events = self._read_events(worker_id)
-        visible_events = self._valuable_events(events)
-        if not self._should_compact_by_context(worker_id, visible_events):
-            return
-        keep_count = max(5, settings.memory_keep_tail_events)
-        older = visible_events[:-keep_count]
-        tail = visible_events[-keep_count:]
-        summary_file = self._agent_dir(worker_id) / "summary.md"
-        existing_lines = self._summary_lines(summary_file)
-        compact_lines = self._compress_events(older)
-        summary_file.write_text(
-            self._format_summary(existing_lines + compact_lines),
-            encoding="utf-8",
-        )
-        with self._events_file(worker_id).open("w", encoding="utf-8") as handle:
-            for item in tail:
-                handle.write(json.dumps(item, ensure_ascii=False) + "\n")
-        self._write_recent_markdown(worker_id)
-
-    def _should_compact_by_context(self, worker_id: str, visible_events: list[dict[str, str]]) -> bool:
-        context_text = "\n".join([
-            self._read_text(self.global_file, settings.llm_context_window_tokens),
-            self._read_text(self._agent_dir(worker_id) / "long_term_memory.md", settings.llm_context_window_tokens),
-            self._read_text(self._agent_dir(worker_id) / "summary.md", settings.llm_context_window_tokens),
-            "\n".join(str(item.get("text", "")) for item in visible_events),
-        ])
-        estimated_tokens = self._estimate_tokens(context_text)
-        compact_at = int(settings.llm_context_window_tokens * settings.memory_compact_context_ratio)
-        return estimated_tokens >= compact_at
-
-    def _estimate_tokens(self, text: str) -> int:
-        # 中文场景按 1 字约 1 token 保守估算；英文按 4 字符约 1 token。
-        cjk_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
-        non_cjk_count = max(0, len(text) - cjk_count)
-        return cjk_count + non_cjk_count // 4
+    @staticmethod
+    def _is_valuable_event(item: dict[str, str]) -> bool:
+        """判断事件是否有存储价值。过滤掉闲聊、纯移动、idle 决策记录。"""
+        text = str(item.get("text", ""))
+        kind = str(item.get("kind", "event"))
+        # 过滤低价值事件
+        low_value_patterns = [
+            "茶水间闲聊:",
+            "规则决策:",       # 无意义的每步决策记录
+            "在工位整理状态",
+            "短暂休息恢复状态",
+            "留在本人固定工位",
+            "继续处理",
+            "暂停移动",
+            "自主循环达到上限",
+            "整理记忆和任务优先级",
+        ]
+        if any(p in text for p in low_value_patterns):
+            return False
+        if kind in ("chat", "movement"):
+            return False
+        return bool(text.strip())
 
     def _ensure_readme(self) -> None:
         readme = self.root / "README.md"
@@ -219,51 +234,6 @@ class AgentMemoryStore:
             if legacy_agent.exists() and not new_agent.exists():
                 new_agent.write_text(legacy_agent.read_text(encoding="utf-8"), encoding="utf-8")
                 legacy_agent.unlink()
-
-    def _compress_events(self, events: list[dict[str, str]]) -> list[str]:
-        buckets: dict[str, list[str]] = {
-            "目标": [],
-            "风险": [],
-            "协作": [],
-            "完成": [],
-            "其他": [],
-        }
-        for item in events:
-            text = self._normalize_memory_text(str(item.get("text", "")))
-            if not self.should_store(text):
-                continue
-            if "老板指令" in text or "领取任务" in text:
-                buckets["目标"].append(text)
-            elif "风险" in text:
-                buckets["风险"].append(text)
-            elif "协作" in text or "待确认" in text:
-                buckets["协作"].append(text)
-            elif "完成任务" in text:
-                buckets["完成"].append(text)
-            else:
-                buckets["其他"].append(text)
-        lines: list[str] = []
-        for title, values in buckets.items():
-            for value in self._dedupe_values(values)[-6:]:
-                lines.append(f"- {title}: {value[:160]}")
-        return self._dedupe_values(lines) or ["- 无可压缩事件。"]
-
-    def _select_events(self, worker_id: str, query: str, limit: int) -> list[dict[str, str]]:
-        events = self._read_events(worker_id)
-        if not events:
-            return []
-        query_tokens = {char for char in query if char.strip()}
-        scored: list[tuple[int, int, dict[str, str]]] = []
-        for index, item in enumerate(events):
-            text = str(item.get("text", ""))
-            if self._is_debug_memory(text):
-                continue
-            score = sum(1 for char in query_tokens if char in text)
-            recent_bonus = max(0, index - len(events) + limit)
-            scored.append((score + recent_bonus, index, item))
-        scored.sort(key=lambda value: (value[0], value[1]), reverse=True)
-        selected = sorted(scored[:limit], key=lambda value: value[1])
-        return [item for _score, _index, item in selected]
 
     def _read_events(self, worker_id: str) -> list[dict[str, str]]:
         events_file = self._events_file(worker_id)

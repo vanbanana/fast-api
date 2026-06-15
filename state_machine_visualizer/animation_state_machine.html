@@ -1,0 +1,1236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>角色动画状态机控制器 (Animation FSM) | 毕业答辩系统</title>
+  <style>
+    :root {
+      --bg-color: #0e0e11; /* 极深灰黑色背景，无任何蓝色调 */
+      --grid-color: rgba(255, 255, 255, 0.07); /* 极细半透明白色网格，呈单灰色，清晰且不刺眼 */
+      --node-bg: rgba(10, 10, 10, 0.95);
+      --border-color: #333333;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      
+      --wire-color: rgba(255, 255, 255, 0.15); /* 玻璃管道质感 */
+      --wire-glow: #38bdf8; /* 亮天蓝色 */
+      
+      --color-idle: #10b981; /* 绿色 */
+      --color-walk: #3b82f6; /* 蓝色 */
+      --color-run: #06b6d4;  /* 青色 */
+      --color-sit: #8b5cf6;  /* 紫色 */
+      --color-code: #f43f5e; /* 玫瑰红 */
+      --color-break: #f59e0b; /* 琥珀黄 */
+      --color-social: #ec4899; /* 粉色 */
+      
+      --panel-bg: rgba(10, 10, 10, 0.95);
+    }
+
+    body, html {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background-color: var(--bg-color); color: var(--text-main);
+      font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden;
+      user-select: none;
+    }
+
+    /* 视口遮罩与大画布平移缩放系统 */
+    .viewport {
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      overflow: hidden;
+      z-index: 1;
+      cursor: grab;
+    }
+    .viewport:active {
+      cursor: grabbing;
+    }
+    .canvas {
+      position: absolute;
+      width: 2400px;
+      height: 1600px;
+      transform-origin: 0 0;
+      z-index: 2;
+    }
+
+    .grid-bg {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background-image: 
+        linear-gradient(to right, var(--grid-color) 1px, transparent 1px),
+        linear-gradient(to bottom, var(--grid-color) 1px, transparent 1px);
+      background-size: 30px 30px; z-index: 0;
+    }
+
+    #wire-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+    #nodes-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+    #labels-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; }
+
+    .node {
+      position: absolute; width: 220px; height: 265px; background: var(--node-bg);
+      border: 2px solid var(--border-color); border-radius: 8px;
+      box-shadow: 0 4px 20px rgba(0,0,0,1);
+      transform: translate(-50%, -50%); transition: box-shadow 0.3s, border-color 0.3s, transform 0.2s;
+      display: flex; flex-direction: column; z-index: 50; pointer-events: auto;
+    }
+    .node.simple-node {
+      width: 150px; height: 165px;
+    }
+    
+    .node.active {
+      transform: translate(-50%, -50%) scale(1.06); z-index: 60;
+      box-shadow: 0 0 25px var(--wire-glow); border-color: var(--wire-glow);
+    }
+
+    /* Bug 调试状态的红光警报动画 */
+    @keyframes bugAlert {
+      0%, 100% { box-shadow: 0 0 15px #f43f5e; border-color: #f43f5e; }
+      50% { box-shadow: 0 0 30px #e11d48; border-color: #e11d48; }
+    }
+    .node#FIXING.active {
+      animation: bugAlert 1s infinite alternate;
+    }
+
+    .node-header { 
+      padding: 6px 10px; font-weight: bold; font-size: 12px; letter-spacing: 1px; 
+      border-bottom: 1px solid var(--border-color); border-radius: 6px 6px 0 0; 
+      display: flex; align-items: center; justify-content: space-between; text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+    }
+    
+    .badge {
+      font-size: 8px; background: rgba(56, 189, 248, 0.15); color: #7dd3fc;
+      padding: 1px 4px; border-radius: 3px; border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+    
+    .bg-idle { border-top: 4px solid var(--color-idle); background: linear-gradient(180deg, rgba(16,185,129,0.12), transparent); }
+    .bg-walk { border-top: 4px solid var(--color-walk); background: linear-gradient(180deg, rgba(59,130,246,0.12), transparent); }
+    .bg-run { border-top: 4px solid var(--color-run); background: linear-gradient(180deg, rgba(6,182,212,0.12), transparent); }
+    .bg-sit { border-top: 4px solid var(--color-sit); background: linear-gradient(180deg, rgba(139,92,246,0.12), transparent); }
+    .bg-code { border-top: 4px solid var(--color-code); background: linear-gradient(180deg, rgba(244,63,94,0.12), transparent); }
+    .bg-break { border-top: 4px solid var(--color-break); background: linear-gradient(180deg, rgba(245,158,11,0.12), transparent); }
+    .bg-social { border-top: 4px solid var(--color-social); background: linear-gradient(180deg, rgba(236,72,153,0.12), transparent); }
+
+    .node-body { 
+      flex-grow: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 6px;
+    }
+    
+    /* BlendSpace 二维混合空间网格 */
+    .blend-space {
+      position: relative; width: 140px; height: 140px;
+      border: 1px dashed rgba(255, 255, 255, 0.1);
+      background: rgba(0,0,0,0.4); border-radius: 6px;
+    }
+    
+    .axis {
+      position: absolute; background: rgba(255, 255, 255, 0.08);
+    }
+    .x-axis { width: 100%; height: 1px; top: 50%; left: 0; }
+    .y-axis { height: 100%; width: 1px; left: 50%; top: 0; }
+    
+    .blend-sprite {
+      position: absolute; display: flex; flex-direction: column; align-items: center;
+      transition: all 0.3s; opacity: 0.3;
+    }
+    .blend-sprite.active {
+      opacity: 1; filter: drop-shadow(0 0 6px var(--wire-glow));
+    }
+    
+    .sprite-preview {
+      width: 32px; height: 64px;
+      background-repeat: no-repeat;
+      background-size: 1792px 1280px; /* 896*2 x 640*2 (2倍物理尺寸) */
+      image-rendering: pixelated;
+      transition: opacity 0.3s;
+    }
+    
+    /* 悬浮 Emoji 动画 */
+    .speech-bubble, .device-icon, .coffee-cup, .sleep-zzz, .celebrate-icon, .distracted-icon {
+      position: absolute; top: -14px; font-size: 14px;
+      animation: floatBubble 1.5s ease-in-out infinite;
+      filter: drop-shadow(0 0 4px var(--wire-glow));
+      opacity: 0.3; transition: 0.3s;
+    }
+    .node.active .speech-bubble,
+    .node.active .device-icon,
+    .node.active .coffee-cup,
+    .node.active .sleep-zzz,
+    .node.active .celebrate-icon,
+    .node.active .distracted-icon {
+      opacity: 1;
+    }
+    @keyframes floatBubble {
+      0% { transform: translateY(0); }
+      50% { transform: translateY(-4px); }
+      100% { transform: translateY(0); }
+    }
+
+    .direction-label {
+      font-size: 7px; color: #666; margin-top: 1px; transform: scale(0.9);
+    }
+    .blend-sprite.active .direction-label {
+      color: #fff; font-weight: bold;
+    }
+    
+    .sprite-up { top: 2px; left: 50%; transform: translateX(-50%); }
+    .sprite-down { bottom: 2px; left: 50%; transform: translateX(-50%); }
+    .sprite-left { left: 2px; top: 50%; transform: translateY(-50%); }
+    .sprite-right { right: 2px; top: 50%; transform: translateY(-50%); }
+    
+    .blend-cursor {
+      position: absolute; width: 8px; height: 8px; background: #fff;
+      border: 2px solid var(--wire-glow); border-radius: 50%;
+      box-shadow: 0 0 10px var(--wire-glow);
+      left: 50%; top: 50%; transform: translate(-50%, -50%);
+      transition: left 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), top 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+      z-index: 5;
+    }
+
+    .node-footer {
+      padding: 4px; font-size: 10px; color: var(--text-muted); text-align: center;
+      border-top: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.3);
+      border-radius: 0 0 6px 6px;
+    }
+    
+    .pin { width: 8px; height: 8px; background: #fff; border: 2px solid #000; border-radius: 50%; position: absolute; z-index: 55; }
+    .pin.left { left: -5px; top: 50%; transform: translateY(-50%); } 
+    .pin.right { right: -5px; top: 50%; transform: translateY(-50%); }
+    .pin.top { top: -5px; left: 50%; transform: translateX(-50%); }
+    .pin.bottom { bottom: -5px; left: 50%; transform: translateX(-50%); }
+
+    .wire-label {
+      position: absolute; background: rgba(0, 0, 0, 0.95); border: 1px solid #333;
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; color: #aaa;
+      transform: translate(-50%, -50%); z-index: 10; 
+      transition: opacity 0.3s, transform 0.3s, border-color 0.3s, box-shadow 0.3s, background 0.3s;
+      pointer-events: auto;
+      white-space: nowrap; opacity: 0; box-shadow: 0 2px 10px rgba(0,0,0,0.8);
+    }
+    .wire-label.active { 
+      opacity: 1; color: #fff; border-color: var(--wire-glow); 
+      box-shadow: 0 0 15px var(--wire-glow); z-index: 40; 
+      background: rgba(56, 189, 248, 0.15); font-weight: bold; transform: translate(-50%, -50%) scale(1.1);
+    }
+
+    #inspector-panel {
+      position: absolute; bottom: 15px; left: 50%; transform: translateX(-50%);
+      width: 85%; max-width: 1200px; background: var(--panel-bg);
+      border: 1px solid #333; border-radius: 12px;
+      box-shadow: 0 -10px 30px rgba(0,0,0,0.9); display: flex; flex-direction: column; overflow: hidden; z-index: 100;
+    }
+    .inspector-header { padding: 12px 25px; background: rgba(0,0,0,0.6); border-bottom: 1px solid #222; display: flex; justify-content: space-between; align-items: center; }
+    .inspector-title { font-size: 18px; font-weight: bold; color: var(--wire-glow); letter-spacing: 1px; }
+
+    .inspector-body { padding: 15px 30px; display: flex; flex-direction: column; min-height: 80px; justify-content: center; }
+    .explanation { font-size: 15px; line-height: 1.6; color: #ddd; }
+    .explanation strong { color: var(--wire-glow); font-weight: bold; padding: 0 4px; }
+
+    .controls { padding: 12px; background: rgba(0,0,0,0.8); border-top: 1px solid #222; display: flex; justify-content: center; gap: 20px; }
+    button { padding: 10px 30px; background: #222; color: white; border: 1px solid #555; border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    button:hover { background: #444; }
+    button.primary { background: #38bdf8; border: none; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+    button.primary:hover { background: #7dd3fc; box-shadow: 0 0 20px rgba(56,189,248,0.6); }
+
+    .title-banner { position: absolute; top: 25px; left: 35px; z-index: 10; pointer-events: none; }
+    .title-banner h1 { margin: 0; font-size: 26px; font-weight: bold; color: #fff; text-shadow: 0 4px 10px #000; }
+    .title-banner h2 { margin: 6px 0 0 0; font-size: 13px; color: var(--wire-glow); letter-spacing: 3px; }
+
+    /* 控制面板 */
+    .top-controls {
+      position: absolute; top: 25px; right: 35px; z-index: 100;
+      display: flex; align-items: center; gap: 12px;
+    }
+
+    .character-selector {
+      background: rgba(10, 10, 10, 0.9); border: 1px solid #333;
+      padding: 8px 15px; border-radius: 8px; display: flex; align-items: center; gap: 10px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    }
+    .character-selector label { font-size: 13px; color: #aaa; font-weight: bold; }
+    .character-selector select {
+      background: #222; color: #fff; border: 1px solid #555; border-radius: 4px;
+      padding: 4px 8px; font-size: 13px; outline: none; cursor: pointer; transition: 0.2s;
+    }
+    .character-selector select:hover { border-color: var(--wire-glow); }
+
+    .switch-btn {
+      padding: 8px 18px; background: rgba(56, 189, 248, 0.15); color: #7dd3fc;
+      border: 1px solid #0284c7; border-radius: 8px; font-size: 13px; font-weight: bold;
+      text-decoration: none; display: inline-flex; align-items: center; gap: 8px;
+      transition: 0.2s; box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+      cursor: pointer;
+    }
+    .switch-btn:hover {
+      background: var(--wire-glow); color: #fff; box-shadow: 0 0 15px rgba(56,189,248,0.5);
+    }
+
+    /* 极致流体脉冲动画 (水流/能量激增效果) */
+    .path-flow { 
+      stroke-dasharray: 80, 120;
+      animation: fluidFlow 1s linear infinite; 
+      stroke-linecap: round;
+      filter: blur(1.5px) drop-shadow(0 0 8px var(--wire-glow));
+    }
+    @keyframes fluidFlow { 
+      from { stroke-dashoffset: 200; } 
+      to { stroke-dashoffset: 0; } 
+    }
+  </style>
+</head>
+<body>
+
+  <div class="title-banner">
+    <h1>角色动画状态机控制器 (Animation FSM)</h1>
+    <h2>CHARACTER SPRITE ANIMATION STATES & TRANSITIONS</h2>
+  </div>
+
+  <div class="top-controls">
+    <button id="btn-reset-view" class="switch-btn" style="background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid #047857;">🔍 重置视角</button>
+    <div class="character-selector">
+      <label for="char-select">当前演示角色：</label>
+      <select id="char-select">
+        <option value="../assets/1_assets_from_others/characters/worker_2.png" selected>Worker 2 (默认)</option>
+        <option value="../assets/1_assets_from_others/characters/worker_3.png">Worker 3</option>
+        <option value="../assets/1_assets_from_others/characters/worker_4.png">Worker 4</option>
+        <option value="../assets/1_assets_from_others/characters/worker_5.png">Worker 5</option>
+        <option value="../assets/1_assets_from_others/characters/worker_6.png">Worker 6</option>
+        <option value="../assets/1_assets_from_others/characters/worker_7.png">Worker 7</option>
+        <option value="../assets/1_assets_from_others/characters/worker_8.png">Worker 8</option>
+        <option value="../assets/1_assets_from_others/characters/worker_9.png">Worker 9</option>
+        <option value="../assets/1_assets_from_others/characters/worker_10.png">Worker 10</option>
+        <option value="../assets/1_assets_from_others/characters/worker_11.png">Worker 11</option>
+      </select>
+    </div>
+    <a href="index.html" class="switch-btn">⬅ 切换至 业务逻辑状态机</a>
+  </div>
+
+  <!-- Viewport wrapper for dragging and zooming -->
+  <div class="viewport" id="viewport">
+    <div class="canvas" id="canvas">
+      <div class="grid-bg"></div>
+      
+      <svg id="wire-canvas" width="2400" height="1600"></svg>
+      
+      <div id="nodes-container">
+        <!-- 12 Core Animation Tree Nodes (4-Column Layout System) -->
+        
+        <!-- ==================== COLUMN 1: Locomotion Zone (X: 300) ==================== -->
+        
+        <!-- Node 1.1: RUN State (300, 250) -->
+        <div class="node" id="RUN" style="left: 300px; top: 250px;">
+          <div class="node-header bg-run">
+            Run (奔跑)
+            <span class="badge">BlendSpace2D</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body">
+            <div class="blend-space">
+              <div class="axis x-axis"></div>
+              <div class="axis y-axis"></div>
+              <div class="blend-sprite sprite-up" id="RUN_UP"><div class="sprite-preview"></div><span class="direction-label">(0, -1) 上</span></div>
+              <div class="blend-sprite sprite-down" id="RUN_DOWN"><div class="sprite-preview"></div><span class="direction-label">(0, 1) 下</span></div>
+              <div class="blend-sprite sprite-left" id="RUN_LEFT"><div class="sprite-preview"></div><span class="direction-label">(-1, 0) 左</span></div>
+              <div class="blend-sprite sprite-right" id="RUN_RIGHT"><div class="sprite-preview"></div><span class="direction-label">(1, 0) 右</span></div>
+              <div class="blend-cursor"></div>
+            </div>
+          </div>
+          <div class="node-footer">blend_position = <span class="blend-val" id="val-RUN">(0.0, 0.0)</span></div>
+        </div>
+
+        <!-- Node 1.2: WALK State (300, 600) -->
+        <div class="node" id="WALK" style="left: 300px; top: 600px;">
+          <div class="node-header bg-walk">
+            Walk (行走)
+            <span class="badge">BlendSpace2D</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body">
+            <div class="blend-space">
+              <div class="axis x-axis"></div>
+              <div class="axis y-axis"></div>
+              <div class="blend-sprite sprite-up" id="WALK_UP"><div class="sprite-preview"></div><span class="direction-label">(0, -1) 上</span></div>
+              <div class="blend-sprite sprite-down" id="WALK_DOWN"><div class="sprite-preview"></div><span class="direction-label">(0, 1) 下</span></div>
+              <div class="blend-sprite sprite-left" id="WALK_LEFT"><div class="sprite-preview"></div><span class="direction-label">(-1, 0) 左</span></div>
+              <div class="blend-sprite sprite-right" id="WALK_RIGHT"><div class="sprite-preview"></div><span class="direction-label">(1, 0) 右</span></div>
+              <div class="blend-cursor"></div>
+            </div>
+          </div>
+          <div class="node-footer">blend_position = <span class="blend-val" id="val-WALK">(0.0, 0.0)</span></div>
+        </div>
+
+        <!-- Node 1.3: IDLE State (300, 950) -->
+        <div class="node" id="IDLE" style="left: 300px; top: 950px;">
+          <div class="node-header bg-idle">
+            Idle (静止待命)
+            <span class="badge">BlendSpace2D</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body">
+            <div class="blend-space">
+              <div class="axis x-axis"></div>
+              <div class="axis y-axis"></div>
+              <div class="blend-sprite sprite-up" id="IDLE_UP"><div class="sprite-preview"></div><span class="direction-label">(0, -1) 上</span></div>
+              <div class="blend-sprite sprite-down" id="IDLE_DOWN"><div class="sprite-preview"></div><span class="direction-label">(0, 1) 下</span></div>
+              <div class="blend-sprite sprite-left" id="IDLE_LEFT"><div class="sprite-preview"></div><span class="direction-label">(-1, 0) 左</span></div>
+              <div class="blend-sprite sprite-right" id="IDLE_RIGHT"><div class="sprite-preview"></div><span class="direction-label">(1, 0) 右</span></div>
+              <div class="blend-cursor"></div>
+            </div>
+          </div>
+          <div class="node-footer">blend_position = <span class="blend-val" id="val-IDLE">(0.0, 0.0)</span></div>
+        </div>
+
+        <!-- ==================== COLUMN 2: Casual & Social Zone (X: 850) ==================== -->
+        
+        <!-- Node 2.1: DISTRACTED State (850, 300) -->
+        <div class="node simple-node" id="DISTRACTED" style="left: 850px; top: 300px;">
+          <div class="node-header bg-idle">
+            Distracted (走神发呆)
+            <span class="badge">Clip</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body" style="position: relative;">
+            <div class="distracted-icon">💭</div>
+            <div class="sprite-preview" id="distracted-preview"></div>
+          </div>
+          <div class="node-footer">挠头/发呆 Row 6</div>
+        </div>
+
+        <!-- Node 2.2: PHONE State (850, 600) -->
+        <div class="node simple-node" id="PHONE" style="left: 850px; top: 600px;">
+          <div class="node-header bg-social">
+            Phone (摸鱼看手机)
+            <span class="badge">Clip</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body" style="position: relative;">
+            <div class="device-icon">📱</div>
+            <div class="sprite-preview" id="phone-preview"></div>
+          </div>
+          <div class="node-footer">看手机/发微信 Row 10</div>
+        </div>
+
+        <!-- Node 2.3: CHATTING State (850, 900) -->
+        <div class="node simple-node" id="CHATTING" style="left: 850px; top: 900px;">
+          <div class="node-header bg-social">
+            Chatting (社交攀谈)
+            <span class="badge">Clip</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body" style="position: relative;">
+            <div class="speech-bubble">💬</div>
+            <div class="sprite-preview" id="chatting-preview"></div>
+          </div>
+          <div class="node-footer">社交会商/搭讪 Row 1</div>
+        </div>
+
+        <!-- ==================== COLUMN 3: Desk Work Zone (X: 1450) ==================== -->
+        
+        <!-- Node 3.1: SIT State (1450, 300) -->
+        <div class="node" id="SIT" style="left: 1450px; top: 300px;">
+          <div class="node-header bg-sit">
+            Sit (就坐待命)
+            <span class="badge">BlendSpace2D</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body">
+            <div class="blend-space">
+              <div class="axis x-axis"></div>
+              <div class="axis y-axis"></div>
+              <div class="blend-sprite sprite-up" id="SIT_UP"><div class="sprite-preview"></div><span class="direction-label">(0, -1) 上</span></div>
+              <div class="blend-sprite sprite-down" id="SIT_DOWN"><div class="sprite-preview"></div><span class="direction-label">(0, 1) 下</span></div>
+              <div class="blend-sprite sprite-left" id="SIT_LEFT"><div class="sprite-preview"></div><span class="direction-label">(-1, 0) 左</span></div>
+              <div class="blend-sprite sprite-right" id="SIT_RIGHT"><div class="sprite-preview"></div><span class="direction-label">(1, 0) 右</span></div>
+              <div class="blend-cursor"></div>
+            </div>
+          </div>
+          <div class="node-footer">blend_position = <span class="blend-val" id="val-SIT">(0.0, 0.0)</span></div>
+        </div>
+
+        <!-- Node 3.2: WRITE_CODE State (1450, 650) -->
+        <div class="node" id="WRITE_CODE" style="left: 1450px; top: 650px;">
+          <div class="node-header bg-code">
+            Write Code (编写代码)
+            <span class="badge">BlendSpace2D</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body">
+            <div class="blend-space">
+              <div class="axis x-axis"></div>
+              <div class="axis y-axis"></div>
+              <div class="blend-sprite sprite-up" id="WRITE_CODE_UP"><div class="sprite-preview"></div><span class="direction-label">(0, -1) 上</span></div>
+              <div class="blend-sprite sprite-down" id="WRITE_CODE_DOWN"><div class="sprite-preview"></div><span class="direction-label">(0, 1) 下</span></div>
+              <div class="blend-sprite sprite-left" id="WRITE_CODE_LEFT"><div class="sprite-preview"></div><span class="direction-label">(-1, 0) 左</span></div>
+              <div class="blend-sprite sprite-right" id="WRITE_CODE_RIGHT"><div class="sprite-preview"></div><span class="direction-label">(1, 0) 右</span></div>
+              <div class="blend-cursor"></div>
+            </div>
+          </div>
+          <div class="node-footer">blend_position = <span class="blend-val" id="val-WRITE_CODE">(0.0, 0.0)</span></div>
+        </div>
+
+        <!-- Node 3.3: FIXING State (1450, 1000) -->
+        <div class="node" id="FIXING" style="left: 1450px; top: 1000px;">
+          <div class="node-header bg-code">
+            Fixing (调试修复)
+            <span class="badge">BlendSpace2D</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body">
+            <div class="blend-space">
+              <div class="axis x-axis"></div>
+              <div class="axis y-axis"></div>
+              <div class="blend-sprite sprite-up" id="FIXING_UP"><div class="sprite-preview"></div><span class="direction-label">(0, -1) 上</span></div>
+              <div class="blend-sprite sprite-down" id="FIXING_DOWN"><div class="sprite-preview"></div><span class="direction-label">(0, 1) 下</span></div>
+              <div class="blend-sprite sprite-left" id="FIXING_LEFT"><div class="sprite-preview"></div><span class="direction-label">(-1, 0) 左</span></div>
+              <div class="blend-sprite sprite-right" id="FIXING_RIGHT"><div class="sprite-preview"></div><span class="direction-label">(1, 0) 右</span></div>
+              <div class="blend-cursor"></div>
+            </div>
+          </div>
+          <div class="node-footer">blend_position = <span class="blend-val" id="val-FIXING">(0.0, 0.0)</span></div>
+        </div>
+
+        <!-- ==================== COLUMN 4: Rest & Result Zone (X: 2050) ==================== -->
+        
+        <!-- Node 4.1: CELEBRATE State (2050, 400) -->
+        <div class="node simple-node" id="CELEBRATE" style="left: 2050px; top: 400px;">
+          <div class="node-header bg-social">
+            Celebrate (庆祝鼓掌)
+            <span class="badge">Clip</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body" style="position: relative;">
+            <div class="celebrate-icon">🎉</div>
+            <div class="sprite-preview" id="celebrate-preview"></div>
+          </div>
+          <div class="node-footer">交付鼓掌 Row 13</div>
+        </div>
+
+        <!-- Node 4.2: DRINK State (2050, 750) -->
+        <div class="node simple-node" id="DRINK" style="left: 2050px; top: 750px;">
+          <div class="node-header bg-break">
+            Drink (茶歇喝咖啡)
+            <span class="badge">Clip</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body" style="position: relative;">
+            <div class="coffee-cup">☕</div>
+            <div class="sprite-preview" id="drink-preview"></div>
+          </div>
+          <div class="node-footer">喝水/喝咖啡 Row 12</div>
+        </div>
+
+        <!-- Node 4.3: NAP State (2050, 1100) -->
+        <div class="node simple-node" id="NAP" style="left: 2050px; top: 1100px;">
+          <div class="node-header bg-break">
+            Nap (趴桌打盹)
+            <span class="badge">Clip</span>
+            <div class="pin right"></div>
+            <div class="pin left"></div>
+            <div class="pin bottom"></div>
+            <div class="pin top"></div>
+          </div>
+          <div class="node-body" style="position: relative;">
+            <div class="sleep-zzz">💤</div>
+            <div class="sprite-preview" id="nap-preview"></div>
+          </div>
+          <div class="node-footer">深度瞌睡睡觉 Row 8</div>
+        </div>
+
+      </div>
+      
+      <div id="labels-container"></div>
+    </div>
+  </div>
+
+  <!-- Inspector Panel -->
+  <div id="inspector-panel">
+    <div class="inspector-header">
+      <div class="inspector-title" id="current-step-title">动画状态机 (Animation FSM) 控制框架</div>
+      <div style="font-size: 14px; color: #94a3b8; font-weight: bold;">转换机制 <span id="step-counter">1/5</span></div>
+    </div>
+    <div class="inspector-body">
+      <div class="explanation" id="logic-explanation"></div>
+    </div>
+    <div class="controls">
+      <button id="btn-prev">⬅ 回溯</button>
+      <button class="primary" id="btn-next">查看下一个动作转换 ➡</button>
+    </div>
+  </div>
+
+  <script>
+    // 23条完美无重叠贝塞尔转换连线
+    const connections = [
+      // Column 1 (Locomotion)
+      { id: "c1", from: "IDLE", fromPin: "top", to: "WALK", toPin: "bottom", label: "移动速度改变：velocity.length > 0", t: 0.5, labelXOffset: -10, labelYOffset: 0 },
+      { id: "c2", from: "WALK", fromPin: "bottom", to: "IDLE", toPin: "top", label: "移动停止：velocity.length == 0", t: 0.5, labelXOffset: 10, labelYOffset: 0 },
+      { id: "c3", from: "WALK", fromPin: "top", to: "RUN", toPin: "bottom", label: "紧急奔跑：is_running == true", t: 0.5, labelXOffset: -10, labelYOffset: 0 },
+      { id: "c4", from: "RUN", fromPin: "bottom", to: "WALK", toPin: "top", label: "慢跑恢复：is_running == false", t: 0.5, labelXOffset: 10, labelYOffset: 0 },
+      
+      // Column 1 to Column 3 (Walk to Sit)
+      { id: "c5", from: "WALK", fromPin: "right", to: "SIT", toPin: "left", label: "寻路到达工位：arrived_at_desk == true", t: 0.45, labelYOffset: -20 },
+      
+      // Column 3 (Desk Work)
+      { id: "c6", from: "SIT", fromPin: "bottom", to: "WRITE_CODE", toPin: "top", label: "分配任务开发：has_active_task == true", t: 0.5, labelXOffset: -10 },
+      { id: "c21", from: "WRITE_CODE", fromPin: "top", to: "SIT", toPin: "bottom", label: "开发暂停/挂起：has_active_task == false", t: 0.5, labelXOffset: 10 },
+      { id: "c7", from: "WRITE_CODE", fromPin: "bottom", to: "FIXING", toPin: "top", label: "触发代码缺陷：is_debugging == true", t: 0.5, labelXOffset: -10 },
+      { id: "c8", from: "FIXING", fromPin: "top", to: "WRITE_CODE", toPin: "bottom", label: "Bug修复完毕：fixing_complete == true", t: 0.5, labelXOffset: 10 },
+      
+      // Column 3 to Column 4 (Work to Celebrate / Drink / Nap)
+      { id: "c9", from: "WRITE_CODE", fromPin: "right", to: "CELEBRATE", toPin: "left", label: "进度满交付：progress == 100%", t: 0.5, labelYOffset: -20 },
+      { id: "c10", from: "CELEBRATE", fromPin: "left", to: "SIT", toPin: "right", label: "庆祝完成归位：celebration_complete == true", t: 0.5, labelYOffset: 20 },
+      
+      { id: "c11", from: "SIT", fromPin: "right", to: "NAP", toPin: "left", label: "进入BREAK深度睡眠：energy < 0.2", t: 0.5, labelYOffset: -20 },
+      { id: "c12", from: "NAP", fromPin: "left", to: "SIT", toPin: "right", label: "精力恢复且睡醒：energy > 0.95", t: 0.5, labelYOffset: 20 },
+      
+      { id: "c13", from: "SIT", fromPin: "right", to: "DRINK", toPin: "left", label: "茶歇喝水/咖啡：energy < 0.5 && fatigue > 0.4", t: 0.5, labelYOffset: -15 },
+      { id: "c14", from: "DRINK", fromPin: "left", to: "SIT", toPin: "right", label: "茶歇恢复结束：drink_complete == true", t: 0.5, labelYOffset: 15 },
+
+      // Column 1 to Column 2 (Idle to Casual)
+      { id: "c15", from: "IDLE", fromPin: "right", to: "DISTRACTED", toPin: "left", label: "空闲开始发呆：energy < 0.3", t: 0.45, labelYOffset: -15 },
+      { id: "c16", from: "DISTRACTED", fromPin: "left", to: "IDLE", toPin: "right", label: "走神恢复：distraction_complete == true", t: 0.45, labelYOffset: 15 },
+      
+      { id: "c17", from: "IDLE", fromPin: "right", to: "PHONE", toPin: "left", label: "摸鱼看手机：rng.randf() < 0.05", t: 0.5, labelYOffset: -15 },
+      { id: "c18", from: "PHONE", fromPin: "left", to: "IDLE", toPin: "right", label: "收起手机：phone_complete == true", t: 0.5, labelYOffset: 15 },
+      
+      { id: "c19", from: "IDLE", fromPin: "right", to: "CHATTING", toPin: "left", label: "附近同事搭讪：nearby_chat == true", t: 0.55, labelYOffset: -15 },
+      { id: "c20", from: "CHATTING", fromPin: "left", to: "IDLE", toPin: "right", label: "交谈结束归位：chat_complete == true", t: 0.55, labelYOffset: 15 },
+
+      // Extra connecting wires
+      { id: "c22", from: "RUN", fromPin: "right", to: "SIT", toPin: "top", label: "紧急奔跑入座", t: 0.5, labelYOffset: -20 },
+      { id: "c23", from: "CHATTING", fromPin: "right", to: "SIT", toPin: "bottom", label: "就座讨论共识", t: 0.5, labelYOffset: 20 }
+    ];
+
+    const steps = [
+      {
+        title: "第一步：现代动作状态机 (Animation FSM) 蓝图概览",
+        activeNodes: ["RUN", "WALK", "IDLE", "DISTRACTED", "PHONE", "CHATTING", "SIT", "WRITE_CODE", "FIXING", "CELEBRATE", "DRINK", "NAP"],
+        activeWires: [],
+        explanation: "欢迎来到重构后的<strong>角色动画树状态机 (Animation FSM)</strong>！<br>本界面完全还原了现代游戏引擎（如虚幻引擎动画蓝图/Godot AnimationTree）的架构质感。<br>支持 **鼠标右键/中键拖拽画布** 以及 **滚轮缩放 (Zoom & Pan)**，彻底解决拥挤杂乱的问题！<br>为了满足复杂的虚拟办公室多智能体模拟需求，我们将状态扩增到了 **12个动作状态**，涵盖移动寻路、常规工作、Bug调试、社交偶发及茶歇休息等全部场景。点击右上角的“🔍 重置视角”可瞬间居中。"
+      },
+      {
+        title: "第二步：常规移动与紧急寻路 (Locomotion & Speed Transitions)",
+        activeNodes: ["IDLE", "WALK", "RUN"],
+        activeWires: ["c1", "c2", "c3", "c4"],
+        explanation: "<strong>移动速度与状态过渡机制：</strong><br>1. **常规移动**：当智能体开始寻路时，速度改变，状态机触发 `c1` 过渡到 <strong>Walk (行走)</strong>，在融合空间内由具体方向（X, Y）的移动帧渲染。<br>2. **紧急奔跑**：当遇到紧急任务或会议时，触发 `is_running == true`，状态机沿着 `c3` 跃迁至 <strong>Run (奔跑)</strong>。奔跑同样具有方向，且动作帧率翻倍以表现急促感。<br>3. **停止**：当速度降为 0，经由 `c2`/`c4` 回归 <strong>Idle (静止待命)</strong>。"
+      },
+      {
+        title: "第三步：偶发行为与社交状态 (Casual & Social Behaviors)",
+        activeNodes: ["IDLE", "DISTRACTED", "PHONE", "CHATTING"],
+        activeWires: ["c15", "c16", "c17", "c18", "c19", "c20"],
+        explanation: "<strong>日常待命时的随机与偶发细节：</strong><br>1. **发呆走神**：若精力偏低（`energy < 0.3`），状态机进入 <strong>Distracted (发呆)</strong>，角色播放抓头动画。<br>2. **查看手机**：智能体在 Idle 时有概率掏出手机 📱 进入 <strong>Phone (看手机)</strong> 状态，模拟摸鱼看消息。<br>3. **社交交谈**：当两名同事在办公室相遇时，触发 `nearby_chat == true` 进入 <strong>Chatting (社交交谈)</strong> 状态，角色头顶冒泡 💬，并伴随局部原地转身细节。"
+      },
+      {
+        title: "第四步：工位编码与 Bug 调试 (Desktop Coding & Bug Fixing)",
+        activeNodes: ["WALK", "SIT", "WRITE_CODE", "FIXING"],
+        activeWires: ["c5", "c6", "c21", "c7", "c8"],
+        explanation: "<strong>工位就坐开发与调试循环：</strong><br>1. **工位落座**：寻路到达后触发 `arrived_at_desk == true` 并滑入 <strong>Sit (就坐)</strong>。融合空间将使人物偏转向特定桌椅朝向（例如朝右落座）。<br>2. **编码工作**：检测到活跃任务后过渡到 <strong>Write Code (写代码)</strong>，播放四向键盘敲击动画。<br>3. **Bug调试**：写代码有几率遇到阻碍，触发 `is_debugging == true` 转入 <strong>Fixing (调试修复)</strong> 状态。该状态下节点闪烁红色警报，表明智能体正在抓狂排错；修复完成后重回常规写代码。"
+      },
+      {
+        title: "第五步：工作成果庆祝与茶歇小憩 (Celebrate & Office Recovery)",
+        activeNodes: ["WRITE_CODE", "CELEBRATE", "SIT", "DRINK", "NAP"],
+        activeWires: ["c9", "c10", "c11", "c12", "c13", "c14"],
+        explanation: "<strong>任务完成及深度休息恢复机制：</strong><br>1. **成果庆祝**：当开发进度达到 100%，触发 `progress == 100%` 过渡到 <strong>Celebrate (庆祝)</strong>，角色播放欢呼鼓掌动画 🎉，随后收心回 SIT 等待新任务。<br>2. **茶歇喝水**：当精力开始滑落，员工会进行常规茶歇进入 <strong>Drink (喝水)</strong> 状态，喝咖啡/水 ☕ 补充能量。<br>3. **趴桌睡觉**：当精力极低（`energy < 0.2`）且进入 BREAK 状态时，员工会直接在座位上进入 <strong>Nap (趴桌打盹)</strong> 状态 💤，高效率恢复精力直至饱满。"
+      }
+    ];
+
+    let currentStep = 0;
+    const wireCanvas = document.getElementById('wire-canvas');
+    const viewport = document.getElementById('viewport');
+    const canvas = document.getElementById('canvas');
+
+    // Zoom & Pan 变量
+    let zoom = 0.7; 
+    let panX = 150;
+    let panY = 80;
+    let isDragging = false;
+    let startX = 0;
+    let startY = 0;
+
+    function updateTransform() {
+      canvas.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+    }
+
+    function resetView() {
+      const vw = viewport.clientWidth;
+      const vh = viewport.clientHeight;
+      zoom = Math.min(vw / 2400, vh / 1600) * 0.95;
+      zoom = Math.max(0.4, Math.min(1.2, zoom));
+      panX = (vw - 2400 * zoom) / 2;
+      panY = (vh - 1600 * zoom) / 2 - 50; 
+      updateTransform();
+    }
+
+    // 绑定 Pan & Zoom 监听
+    viewport.addEventListener('mousedown', (e) => {
+      // 只有在点击背景、画布或SVG时，才可以拖拽
+      if (e.target === viewport || e.target.classList.contains('grid-bg') || e.target.id === 'wire-canvas') {
+        isDragging = true;
+        startX = e.clientX - panX;
+        startY = e.clientY - panY;
+      }
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (isDragging) {
+        panX = e.clientX - startX;
+        panY = e.clientY - startY;
+        updateTransform();
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      isDragging = false;
+    });
+
+    viewport.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const zoomFactor = 0.05;
+      const mouseX = e.clientX - viewport.getBoundingClientRect().left;
+      const mouseY = e.clientY - viewport.getBoundingClientRect().top;
+
+      // 缩放前的画布局部坐标
+      const canvasX = (mouseX - panX) / zoom;
+      const canvasY = (mouseY - panY) / zoom;
+
+      if (e.deltaY < 0) {
+        zoom = Math.min(2.0, zoom + zoomFactor);
+      } else {
+        zoom = Math.max(0.4, zoom - zoomFactor);
+      }
+
+      // 让鼠标悬浮中心点不发生偏移
+      panX = mouseX - canvasX * zoom;
+      panY = mouseY - canvasY * zoom;
+
+      updateTransform();
+    }, { passive: false });
+
+    function getPinCoords(node, pinDir) {
+      const nodeLeft = node.offsetLeft;
+      const nodeTop = node.offsetTop;
+      // 容错降级尺寸
+      const nodeWidth = node.offsetWidth || (node.classList.contains('simple-node') ? 150 : 220);
+      const nodeHeight = node.offsetHeight || (node.classList.contains('simple-node') ? 165 : 265);
+      
+      const left = nodeLeft - nodeWidth / 2;
+      const top = nodeTop - nodeHeight / 2;
+      
+      if (pinDir === 'left') {
+        return { x: left, y: top + nodeHeight / 2 };
+      } else if (pinDir === 'right') {
+        return { x: left + nodeWidth, y: top + nodeHeight / 2 };
+      } else if (pinDir === 'top') {
+        return { x: left + nodeWidth / 2, y: top };
+      } else if (pinDir === 'bottom') {
+        return { x: left + nodeWidth / 2, y: top + nodeHeight };
+      }
+      return { x: nodeLeft, y: nodeTop };
+    }
+
+    function renderWires() {
+      wireCanvas.innerHTML = `
+        <defs>
+          <marker id="arrow-default" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 2 L 12 6 L 0 10 z" fill="rgba(255,255,255,0.3)" />
+          </marker>
+          <marker id="arrow-active" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+            <path d="M 0 1 L 12 6 L 0 11 z" fill="var(--wire-glow)" />
+          </marker>
+        </defs>
+      `;
+
+      document.getElementById('labels-container').innerHTML = '';
+
+      connections.forEach(conn => {
+        const fromNode = document.getElementById(conn.from);
+        const toNode = document.getElementById(conn.to);
+        if(!fromNode || !toNode) return;
+
+        const start = getPinCoords(fromNode, conn.fromPin);
+        const end = getPinCoords(toNode, conn.toPin);
+
+        let cp1x = start.x, cp1y = start.y;
+        let cp2x = end.x, cp2y = end.y;
+
+        const distanceX = Math.abs(end.x - start.x);
+        const distanceY = Math.abs(end.y - start.y);
+        const tension = Math.max(80, Math.min(distanceX, distanceY) * 0.7 + 30);
+
+        if (conn.fromPin === 'right') cp1x += tension;
+        if (conn.fromPin === 'left') cp1x -= tension;
+        if (conn.fromPin === 'top') cp1y -= tension;
+        if (conn.fromPin === 'bottom') cp1y += tension;
+
+        if (conn.toPin === 'right') cp2x += tension;
+        if (conn.toPin === 'left') cp2x -= tension;
+        if (conn.toPin === 'top') cp2y -= tension;
+        if (conn.toPin === 'bottom') cp2y += tension;
+
+        // 对特定长线和闭合环路做细致微调，避免卡片交叉与混乱
+        if (conn.id === "c1") {
+          cp1x = start.x - 100; cp1y = start.y - 100;
+          cp2x = end.x - 100; cp2y = end.y + 100;
+        } else if (conn.id === "c2") {
+          cp1x = start.x + 100; cp1y = start.y + 100;
+          cp2x = end.x + 100; cp2y = end.y - 100;
+        } else if (conn.id === "c3") {
+          cp1x = start.x - 100; cp1y = start.y - 100;
+          cp2x = end.x - 100; cp2y = end.y + 100;
+        } else if (conn.id === "c4") {
+          cp1x = start.x + 100; cp1y = start.y + 100;
+          cp2x = end.x + 100; cp2y = end.y - 100;
+        } else if (conn.id === "c5") {
+          cp1x = start.x + 500; cp1y = start.y - 200;
+          cp2x = end.x - 500; cp2y = end.y - 200;
+        } else if (conn.id === "c6") {
+          cp1x = start.x - 100; cp1y = start.y + 100;
+          cp2x = end.x - 100; cp2y = end.y - 100;
+        } else if (conn.id === "c21") {
+          cp1x = start.x + 100; cp1y = start.y - 100;
+          cp2x = end.x + 100; cp2y = end.y + 100;
+        } else if (conn.id === "c7") {
+          cp1x = start.x - 100; cp1y = start.y + 100;
+          cp2x = end.x - 100; cp2y = end.y - 100;
+        } else if (conn.id === "c8") {
+          cp1x = start.x + 100; cp1y = start.y - 100;
+          cp2x = end.x + 100; cp2y = end.y + 100;
+        } else if (conn.id === "c15") {
+          cp1x = start.x + 200; cp1y = start.y - 100;
+          cp2x = end.x - 200; cp2y = end.y + 100;
+        } else if (conn.id === "c16") {
+          cp1x = start.x - 200; cp1y = start.y + 100;
+          cp2x = end.x + 200; cp2y = end.y - 100;
+        } else if (conn.id === "c22") { // RUN -> SIT
+          cp1x = start.x + 400; cp1y = start.y - 150;
+          cp2x = end.x - 400; cp2y = end.y - 150;
+        } else if (conn.id === "c23") { // CHATTING -> SIT
+          cp1x = start.x + 200; cp1y = start.y - 100;
+          cp2x = end.x - 200; cp2y = end.y + 100;
+        } else if (conn.id === "c11") { // SIT -> NAP
+          cp1x = start.x + 300; cp1y = start.y + 200;
+          cp2x = end.x - 300; cp2y = end.y - 200;
+        } else if (conn.id === "c12") { // NAP -> SIT
+          cp1x = start.x - 300; cp1y = start.y - 200;
+          cp2x = end.x + 300; cp2y = end.y + 200;
+        }
+
+        const pathData = `M ${start.x} ${start.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${end.x} ${end.y}`;
+
+        // 管道底线 (微透玻璃质感)
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", pathData);
+        path.setAttribute("fill", "none");
+        path.setAttribute("stroke", "var(--wire-color)");
+        path.setAttribute("stroke-width", "3");
+        path.setAttribute("marker-end", "url(#arrow-default)");
+        path.setAttribute("id", "wire-" + conn.id);
+        wireCanvas.appendChild(path);
+
+        // 流体能量线
+        const flowPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        flowPath.setAttribute("d", pathData);
+        flowPath.setAttribute("fill", "none");
+        flowPath.setAttribute("stroke", "var(--wire-glow)");
+        flowPath.setAttribute("stroke-width", "4");
+        flowPath.setAttribute("marker-end", "url(#arrow-active)");
+        flowPath.setAttribute("opacity", "0");
+        flowPath.setAttribute("id", "flow-" + conn.id);
+        flowPath.classList.add("path-flow");
+        wireCanvas.appendChild(flowPath);
+
+        // 文本标签
+        const label = document.createElement("div");
+        label.className = "wire-label";
+        label.id = "label-" + conn.id;
+        label.innerText = conn.label;
+        
+        const t = conn.t !== undefined ? conn.t : 0.5;
+        let midX = Math.pow(1-t,3)*start.x + 3*Math.pow(1-t,2)*t*cp1x + 3*(1-t)*Math.pow(t,2)*cp2x + Math.pow(t,3)*end.x;
+        let midY = Math.pow(1-t,3)*start.y + 3*Math.pow(1-t,2)*t*cp1y + 3*(1-t)*Math.pow(t,2)*cp2y + Math.pow(t,3)*end.y;
+        
+        if (conn.labelXOffset) midX += conn.labelXOffset;
+        if (conn.labelYOffset) midY += conn.labelYOffset;
+
+        label.style.left = midX + "px";
+        label.style.top = midY + "px";
+        
+        label.dataset.baseLeft = midX;
+        label.dataset.baseTop = midY;
+        
+        document.getElementById('labels-container').appendChild(label);
+      });
+    }
+
+    // 标签碰撞避让引擎：检测激活的条件标签并位移
+    function resolveLabelCollisions() {
+      const labels = Array.from(document.querySelectorAll('.wire-label'));
+      const visibleLabels = labels.filter(label => label.classList.contains('active'));
+
+      visibleLabels.forEach(label => {
+        if (label.dataset.baseLeft && label.dataset.baseTop) {
+          label.style.left = label.dataset.baseLeft + 'px';
+          label.style.top = label.dataset.baseTop + 'px';
+        }
+      });
+
+      if (visibleLabels.length <= 1) return;
+
+      const paddingX = 16;
+      const paddingY = 8;
+      let adjusted = true;
+      let iterations = 20;
+
+      while (iterations > 0 && adjusted) {
+        adjusted = false;
+        for (let i = 0; i < visibleLabels.length; i++) {
+          for (let j = i + 1; j < visibleLabels.length; j++) {
+            const rect1 = visibleLabels[i].getBoundingClientRect();
+            const rect2 = visibleLabels[j].getBoundingClientRect();
+
+            const overlapX = Math.min(rect1.right, rect2.right) - Math.max(rect1.left, rect2.left);
+            const overlapY = Math.min(rect1.bottom, rect2.bottom) - Math.max(rect1.top, rect2.top);
+
+            if (overlapX > -paddingX && overlapY > -paddingY) {
+              adjusted = true;
+
+              const c1x = rect1.left + rect1.width / 2;
+              const c1y = rect1.top + rect1.height / 2;
+              const c2x = rect2.left + rect2.width / 2;
+              const c2y = rect2.top + rect2.height / 2;
+
+              const dx = c1x - c2x;
+              const dy = c1y - c2y;
+
+              // 分裂缩放下的坐标平移计算修正 (除以 zoom)
+              if (Math.abs(dy) > 5) {
+                const shiftY = ((overlapY + paddingY) / 2) / zoom;
+                const sign = dy >= 0 ? 1 : -1;
+                
+                const top1 = parseFloat(visibleLabels[i].style.top) || 0;
+                const top2 = parseFloat(visibleLabels[j].style.top) || 0;
+                
+                visibleLabels[i].style.top = (top1 + sign * shiftY) + 'px';
+                visibleLabels[j].style.top = (top2 - sign * shiftY) + 'px';
+              } else {
+                const shiftX = ((overlapX + paddingX) / 2) / zoom;
+                const sign = dx >= 0 ? 1 : -1;
+                
+                const left1 = parseFloat(visibleLabels[i].style.left) || 0;
+                const left2 = parseFloat(visibleLabels[j].style.left) || 0;
+                
+                visibleLabels[i].style.left = (left1 + sign * shiftX) + 'px';
+                visibleLabels[j].style.left = (left2 - sign * shiftX) + 'px';
+              }
+            }
+          }
+        }
+        iterations--;
+      }
+    }
+
+    let rotationInterval = null;
+
+    function updateBlendSpaces() {
+      if (rotationInterval) {
+        clearInterval(rotationInterval);
+        rotationInterval = null;
+      }
+
+      // 重置所有混合焦点
+      document.querySelectorAll('.blend-cursor').forEach(c => {
+        c.style.left = '50%';
+        c.style.top = '50%';
+      });
+      document.querySelectorAll('.blend-val').forEach(v => {
+        v.innerText = '(0.0, 0.0)';
+      });
+      document.querySelectorAll('.blend-sprite').forEach(s => {
+        s.classList.remove('active');
+      });
+      
+      const simplePreviews = [
+        'distracted-preview', 'phone-preview', 'chatting-preview', 
+        'drink-preview', 'celebrate-preview', 'nap-preview'
+      ];
+      simplePreviews.forEach(pid => {
+        const el = document.getElementById(pid);
+        if (el) el.style.opacity = '0.3';
+      });
+
+      // 默认状态下激活 Down 方向，高亮展示 Clip
+      if (currentStep === 0) {
+        document.querySelectorAll('.node:not(.simple-node)').forEach(node => {
+          const spriteDown = node.querySelector('.sprite-down');
+          if (spriteDown) spriteDown.classList.add('active');
+        });
+        simplePreviews.forEach(pid => {
+          const el = document.getElementById(pid);
+          if (el) el.style.opacity = '1';
+        });
+      }
+
+      if (currentStep === 1) { // 移动与寻路
+        const activeLocomotion = ['WALK', 'RUN', 'IDLE'];
+        activeLocomotion.forEach(nid => {
+          const node = document.getElementById(nid);
+          if (node) {
+            node.querySelector('.blend-cursor').style.left = '50%';
+            node.querySelector('.blend-cursor').style.top = '90%';
+            node.querySelector('.blend-val').innerText = '(0.0, 1.0)';
+            node.querySelector('.sprite-down').classList.add('active');
+          }
+        });
+      } 
+      else if (currentStep === 2) { // 发呆/摸鱼/聊天旋转
+        const distracted = document.getElementById('distracted-preview');
+        const phone = document.getElementById('phone-preview');
+        const chatting = document.getElementById('chatting-preview');
+        if (distracted) distracted.style.opacity = '1';
+        if (phone) phone.style.opacity = '1';
+        if (chatting) chatting.style.opacity = '1';
+
+        const idleNode = document.getElementById('IDLE');
+        if (idleNode) {
+          const cursor = idleNode.querySelector('.blend-cursor');
+          const valText = idleNode.querySelector('.blend-val');
+          const sprites = {
+            down: idleNode.querySelector('.sprite-down'),
+            left: idleNode.querySelector('.sprite-left'),
+            up: idleNode.querySelector('.sprite-up'),
+            right: idleNode.querySelector('.sprite-right')
+          };
+
+          const sequence = [
+            { dir: 'down', left: '50%', top: '90%', val: '(0.0, 1.0)' },
+            { dir: 'left', left: '10%', top: '50%', val: '(-1.0, 0.0)' },
+            { dir: 'up', left: '50%', top: '10%', val: '(0.0, -1.0)' },
+            { dir: 'right', left: '90%', top: '50%', val: '(1.0, 0.0)' }
+          ];
+
+          let seqIdx = 0;
+          const runCycle = () => {
+            Object.values(sprites).forEach(s => s.classList.remove('active'));
+            const state = sequence[seqIdx];
+            cursor.style.left = state.left;
+            cursor.style.top = state.top;
+            valText.innerText = state.val;
+            sprites[state.dir].classList.add('active');
+            seqIdx = (seqIdx + 1) % sequence.length;
+          };
+          
+          runCycle();
+          rotationInterval = setInterval(runCycle, 1200);
+        }
+      } 
+      else if (currentStep === 3) { // 编码与调试
+        const sitNode = document.getElementById('SIT');
+        if (sitNode) {
+          sitNode.querySelector('.blend-cursor').style.left = '90%';
+          sitNode.querySelector('.blend-cursor').style.top = '50%';
+          sitNode.querySelector('.blend-val').innerText = '(1.0, 0.0)';
+          sitNode.querySelector('.sprite-right').classList.add('active');
+        }
+        
+        const codeNode = document.getElementById('WRITE_CODE');
+        if (codeNode) {
+          codeNode.querySelector('.blend-cursor').style.left = '90%';
+          codeNode.querySelector('.blend-cursor').style.top = '50%';
+          codeNode.querySelector('.blend-val').innerText = '(1.0, 0.0)';
+          codeNode.querySelector('.sprite-right').classList.add('active');
+        }
+
+        const fixingNode = document.getElementById('FIXING');
+        if (fixingNode) {
+          fixingNode.querySelector('.blend-cursor').style.left = '90%';
+          fixingNode.querySelector('.blend-cursor').style.top = '50%';
+          fixingNode.querySelector('.blend-val').innerText = '(1.0, 0.0)';
+          fixingNode.querySelector('.sprite-right').classList.add('active');
+        }
+      } 
+      else if (currentStep === 4) { // 庆祝与茶歇/打盹
+        const celebrate = document.getElementById('celebrate-preview');
+        const drink = document.getElementById('drink-preview');
+        const nap = document.getElementById('nap-preview');
+        if (celebrate) celebrate.style.opacity = '1';
+        if (drink) drink.style.opacity = '1';
+        if (nap) nap.style.opacity = '1';
+
+        const sitNode = document.getElementById('SIT');
+        if (sitNode) {
+          sitNode.querySelector('.blend-cursor').style.left = '90%';
+          sitNode.querySelector('.blend-cursor').style.top = '50%';
+          sitNode.querySelector('.blend-val').innerText = '(1.0, 0.0)';
+          sitNode.querySelector('.sprite-right').classList.add('active');
+        }
+      }
+    }
+
+    function updateView() {
+      const step = steps[currentStep];
+
+      document.getElementById('current-step-title').innerText = step.title;
+      document.getElementById('step-counter').innerText = `${currentStep + 1}/${steps.length}`;
+      document.getElementById('logic-explanation').innerHTML = step.explanation;
+
+      // 隐藏所有节点激活态
+      document.querySelectorAll('.node').forEach(n => n.classList.remove('active'));
+      document.querySelectorAll('#wire-canvas path[id^="wire-"]').forEach(p => {
+        p.setAttribute('stroke', 'var(--wire-color)');
+        p.style.opacity = "0.3";
+      });
+      document.querySelectorAll('[id^="flow-"]').forEach(p => p.setAttribute('opacity', '0'));
+      document.querySelectorAll('.wire-label').forEach(l => {
+        l.classList.remove('active');
+      });
+
+      // 激活当前步骤对应的卡片与连线
+      step.activeNodes.forEach(nid => {
+        const node = document.getElementById(nid);
+        if (node) node.classList.add('active');
+      });
+
+      step.activeWires.forEach(wid => {
+        const flow = document.getElementById("flow-" + wid);
+        const label = document.getElementById("label-" + wid);
+        
+        if (flow) flow.setAttribute('opacity', '1');
+        if (label) label.classList.add('active');
+      });
+      
+      // 第一步全激活微亮水流
+      if (currentStep === 0) {
+        document.querySelectorAll('#wire-canvas path[id^="flow-"]').forEach(p => {
+          p.setAttribute('opacity', '0.5');
+        });
+      }
+
+      updateBlendSpaces();
+      setTimeout(resolveLabelCollisions, 50);
+    }
+
+    // Sprite 帧循环动效管理
+    const animators = {};
+    function startSpriteAnimations() {
+      const animationFrames = {
+        "IDLE_UP": [62, 63, 64, 65, 66, 67],
+        "IDLE_DOWN": [74, 75, 76, 77, 78, 79],
+        "IDLE_LEFT": [68, 69, 70, 71, 72, 73],
+        "IDLE_RIGHT": [56, 57, 58, 59, 60, 61],
+        "WALK_UP": [118, 119, 120, 121, 122, 123],
+        "WALK_DOWN": [130, 131, 132, 133, 134, 135],
+        "WALK_LEFT": [124, 125, 126, 127, 128, 129],
+        "WALK_RIGHT": [112, 113, 114, 115, 116, 117],
+        "RUN_UP": [118, 119, 120, 121, 122, 123],
+        "RUN_DOWN": [130, 131, 132, 133, 134, 135],
+        "RUN_LEFT": [124, 125, 126, 127, 128, 129],
+        "RUN_RIGHT": [112, 113, 114, 115, 116, 117],
+        "SIT_UP": [62, 63, 64, 65, 66, 67],
+        "SIT_DOWN": [74, 75, 76, 77, 78, 79],
+        "SIT_LEFT": [230, 231, 232, 233, 234, 235],
+        "SIT_RIGHT": [224, 225, 226, 227, 228, 229],
+        "WRITE_CODE_UP": [516, 517, 518, 519, 520, 521, 522, 523, 524, 525, 526, 527],
+        "WRITE_CODE_DOWN": [540, 541, 542, 543, 544, 545, 546, 547, 548, 549, 550, 551],
+        "WRITE_CODE_LEFT": [528, 529, 530, 531, 532, 533, 534, 535, 536, 537, 538, 539],
+        "WRITE_CODE_RIGHT": [504, 505, 506, 507, 508, 509, 510, 511, 512, 513, 514, 515],
+        "FIXING_UP": [516, 517, 518, 519, 520, 521, 522, 523, 524, 525, 526, 527],
+        "FIXING_DOWN": [540, 541, 542, 543, 544, 545, 546, 547, 548, 549, 550, 551],
+        "FIXING_LEFT": [528, 529, 530, 531, 532, 533, 534, 535, 536, 537, 538, 539],
+        "FIXING_RIGHT": [504, 505, 506, 507, 508, 509, 510, 511, 512, 513, 514, 515],
+        "distracted-preview": [336, 337, 338, 339, 340, 343, 342, 343, 344, 345, 346, 347, 3],
+        "phone-preview": [560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571],
+        "chatting-preview": [74, 75, 76, 77, 78, 79],
+        "drink-preview": [672, 673, 674, 675, 676, 677, 678, 679, 680, 681, 682, 683],
+        "celebrate-preview": [728, 729, 730, 731, 732, 733, 734, 735, 736, 737, 738, 739],
+        "nap-preview": [448, 449, 450, 451, 452, 453, 454, 455, 456, 457, 458, 459]
+      };
+      
+      const charSelect = document.getElementById('char-select');
+      
+      Object.keys(animationFrames).forEach(id => {
+        const spriteEl = document.getElementById(id) ? (document.getElementById(id).querySelector('.sprite-preview') || document.getElementById(id)) : null;
+        if (!spriteEl) return;
+        
+        spriteEl.style.backgroundImage = `url('${charSelect.value}')`;
+        
+        const frames = animationFrames[id];
+        let frameIndex = 0;
+        
+        if (animators[id]) clearInterval(animators[id]);
+        
+        // Run (奔跑) 动画的频率翻倍 (80ms)
+        const interval = (id.startsWith("RUN")) ? 80 : 150;
+        
+        animators[id] = setInterval(() => {
+          const frame = frames[frameIndex];
+          const col = frame % 56;
+          const row = Math.floor(frame / 56);
+          spriteEl.style.backgroundPosition = `-${col * 32}px -${row * 64}px`;
+          frameIndex = (frameIndex + 1) % frames.length;
+        }, interval);
+      });
+    }
+
+    document.getElementById('char-select').addEventListener('change', (e) => {
+      startSpriteAnimations();
+    });
+
+    document.getElementById('btn-reset-view').addEventListener('click', () => {
+      resetView();
+    });
+
+    window.addEventListener('resize', () => {
+      renderWires();
+      updateView();
+    });
+
+    document.getElementById('btn-next').addEventListener('click', () => {
+      if (currentStep < steps.length - 1) currentStep++;
+      else currentStep = 0;
+      updateView();
+    });
+
+    document.getElementById('btn-prev').addEventListener('click', () => {
+      if (currentStep > 0) currentStep--;
+      updateView();
+    });
+
+    setTimeout(() => {
+      resetView();
+      renderWires();
+      startSpriteAnimations();
+      updateView();
+    }, 100);
+
+  </script>
+</body>
+</html>

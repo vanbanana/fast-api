@@ -89,8 +89,8 @@ class ProjectTask:
         return False
 
     def needs_review(self) -> bool:
-        """开发类任务完成后要提测，由测试验收后才算真正完成。"""
-        return self.task_type in ("backend", "frontend", "design", "general") and self.review_state == ""
+        """审核流程暂未实现，所有任务到100%直接完成。"""
+        return False
 
     def fail_review(self, note: str) -> None:
         self.status = "doing"

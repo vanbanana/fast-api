@@ -8,3 +8,18 @@ backend/.env
 __pycache__/
 *.pyc
 .venv/
+
+# Runtime data / logs
+backend/memory/
+backend/debug_log.txt
+backend/*.log
+
+# Web export build artifacts (keep web/ for deployment but can rebuild)
+# web/  # Keep for deployment reference
+
+# IDE / tools
+.trae/
+
+# OS
+.DS_Store
+Thumbs.db

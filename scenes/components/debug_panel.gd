@@ -1,5 +1,5 @@
 extends Node
-## F12 调试面板：展示 Godot <-> 后端 <-> 角色移动链路的实时状态。
+## F12 调试面板：精简版，只显示关键状态和重要事件。
 
 const PixelStyles := preload("res://scenes/components/pixel_styles.gd")
 const AgentStateStore := preload("res://scenes/components/agent_state_store.gd")
@@ -12,10 +12,12 @@ var _styles: PixelStyles
 var _panel: PanelContainer
 var _label: Label
 var _visible: bool = false
-var _sent_log: Array[String] = []
-var _received_log: Array[String] = []
 var _status_provider: Callable
 var _worker_line_provider: Callable
+
+# 只记录重要事件（最多 12 条，LLM 日志单独计数）
+var _events: Array[String] = []
+var _llm_events: Array[String] = []
 
 
 func setup(ui_theme: PixelUiTheme, state_store: AgentStateStore, status_provider: Callable, worker_line_provider: Callable) -> void:
@@ -34,7 +36,7 @@ func setup(ui_theme: PixelUiTheme, state_store: AgentStateStore, status_provider
 	_panel.name = "DebugPanel"
 	_panel.visible = false
 	_panel.position = Vector2(8, 92)
-	_panel.custom_minimum_size = Vector2(620, 560)
+	_panel.custom_minimum_size = Vector2(520, 420)
 	_panel.mouse_filter = Control.MOUSE_FILTER_PASS
 	_styles.apply_panel_style(_panel)
 	layer.add_child(_panel)
@@ -44,22 +46,17 @@ func setup(ui_theme: PixelUiTheme, state_store: AgentStateStore, status_provider
 	_panel.add_child(box)
 
 	var title := Label.new()
-	title.text = "F12 Debug 链路面板"
+	title.text = "F12 Debug"
 	title.add_theme_font_size_override("font_size", theme.ui_font_size)
 	title.add_theme_color_override("font_color", theme.detail_text_color)
 	box.add_child(title)
 
-	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(596, 500)
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	box.add_child(scroll)
-
 	_label = Label.new()
-	_label.custom_minimum_size = Vector2(572, 0)
+	_label.custom_minimum_size = Vector2(490, 0)
 	_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_label.add_theme_font_size_override("font_size", theme.detail_font_size)
 	_label.add_theme_color_override("font_color", theme.detail_text_color)
-	scroll.add_child(_label)
+	box.add_child(_label)
 
 
 func _process(_delta: float) -> void:
@@ -75,43 +72,59 @@ func toggle() -> void:
 		_refresh()
 
 
+## 只记录重要事件：老板指令、找人、会议、错误。
 func log_sent(text: String) -> void:
-	_push_log(_sent_log, text)
+	if text.begins_with("BOSS_INPUT"):
+		_add_event("[→] %s" % text.substr(10))
+	elif text.begins_with("ATMOSPHERE_REQUEST"):
+		pass  # 氛围请求太频繁，忽略
 
 
 func log_received(text: String) -> void:
-	_push_log(_received_log, text)
+	if text.begins_with("ERRAND_SEEK") or text.begins_with("ERRAND_SEEK_MISSING"):
+		_add_event("[SEEK] %s" % text)
+	elif text.begins_with("MOVE_FAILED") or text.begins_with("PARSE_FAILED"):
+		_add_event("[!] %s" % text)
+	elif text.begins_with("CHAT"):
+		_add_event("[CHAT] %s" % text)
 
 
 func log_received_command(command: Dictionary) -> void:
-	_push_log(_received_log, command_summary(command))
-
-
-func command_summary(command: Dictionary) -> String:
 	var action := str(command.get("action", ""))
 	var worker_id := str(command.get("worker_id", ""))
-	var target_id := str(command.get("target_id", ""))
 	var say := str(command.get("say", ""))
-	var payload_value: Variant = command.get("payload", {})
-	var status := ""
-	var travel_mode := ""
-	var memory_count := 0
-	if payload_value is Dictionary:
-		var payload_dict := payload_value as Dictionary
-		status = str(payload_dict.get("status", ""))
-		travel_mode = str(payload_dict.get("travel_mode", ""))
-		var memory_value: Variant = payload_dict.get("memory", [])
-		if memory_value is Array:
-			memory_count = (memory_value as Array).size()
-	return "%s worker=%s target=%s travel=%s status=%s say=%s memory=%s" % [
-		action,
-		worker_id,
-		target_id,
-		travel_mode,
-		_shorten_text(status, 40),
-		_shorten_text(say, 60),
-		str(memory_count),
-	]
+	if action == "errand_seek":
+		_add_event("[SEEK] %s → 找人" % worker_id)
+	elif action == "move_to":
+		var target_id := str(command.get("target_id", ""))
+		_add_event("[MOVE] %s → %s" % [worker_id, target_id])
+	elif !say.is_empty() and action == "say":
+		_add_event("[%s] %s: %s" % [action.to_upper(), worker_id, say.substr(0, 50)])
+	elif action == "atmosphere_response":
+		pass  # 氛围响应太频繁，忽略
+
+
+func log_event(text: String) -> void:
+	_add_event("[EVENT] %s" % text)
+
+
+func log_llm_call(tag: String, tokens_in: int, tokens_out: int, result: String) -> void:
+	_add_llm_event("🤖 %s | %d→%d tok | %s" % [tag, tokens_in, tokens_out, result.substr(0, 60)])
+
+
+func _add_event(text: String) -> void:
+	text = _shorten(text, 200)
+	_events.append(text)
+	if _events.size() > 12:
+		_events.remove_at(0)
+
+
+func _add_llm_event(text: String) -> void:
+	text = _shorten(text, 200)
+	_llm_events.append(text)
+	# LLM 日志保留最近 5 条（太多会刷屏）
+	if _llm_events.size() > 5:
+		_llm_events.remove_at(0)
 
 
 func _refresh() -> void:
@@ -119,52 +132,41 @@ func _refresh() -> void:
 		return
 
 	var lines: Array[String] = []
-	lines.append("按 F12 关闭。这里显示 Godot <-> 后端 <-> 角色移动的实时状态。")
+	# 连接状态 + 目标计数
 	if _status_provider.is_valid():
 		lines.append(str(_status_provider.call()))
-	lines.append("targets seat=%s idle=%s roam=%s total=%s" % [
-		str(target_counts.get("seat", 0)),
-		str(target_counts.get("idle", 0)),
-		str(target_counts.get("roam", 0)),
-		str(target_counts.get("total", 0)),
+	lines.append("座位=%d 休息点=%d  漫游点=%d" % [
+		target_counts.get("seat", 0),
+		target_counts.get("idle", 0),
+		target_counts.get("roam", 0),
 	])
 	lines.append("")
-	lines.append("Workers")
+
+	# 员工状态（紧凑单行）
 	if _worker_line_provider.is_valid():
 		var worker_lines: Variant = _worker_line_provider.call()
 		if worker_lines is Array:
 			for line in worker_lines:
 				lines.append(str(line))
-	lines.append("")
-	lines.append("Sent")
-	lines.append(_format_log(_sent_log))
-	lines.append("")
-	lines.append("Received")
-	lines.append(_format_log(_received_log))
+
+	# 重要事件
+	if !_events.is_empty():
+		lines.append("")
+		lines.append("--- 事件 ---")
+		for ev in _events:
+			lines.append(str(ev))
+
+	# LLM 调用日志
+	if !_llm_events.is_empty():
+		lines.append("")
+		lines.append("--- LLM ---")
+		for ev in _llm_events:
+			lines.append(str(ev))
+
 	_label.text = "\n".join(lines)
 
 
-func _push_log(log: Array[String], text: String) -> void:
-	var compact_text := _shorten_text(text, 260)
-	if compact_text.begins_with("stream_delta "):
-		return
-	if !log.is_empty() and log[-1] == compact_text:
-		return
-	log.append(compact_text)
-	if log.size() > 24:
-		log.remove_at(0)
-
-
-func _format_log(log: Array[String]) -> String:
-	if log.is_empty():
-		return "- empty"
-	var lines: Array[String] = []
-	for item in log:
-		lines.append("- %s" % item)
-	return "\n".join(lines)
-
-
-func _shorten_text(text: String, max_length: int) -> String:
-	if text.length() <= max_length:
+func _shorten(text: String, max_len: int) -> String:
+	if text.length() <= max_len:
 		return text
-	return text.substr(0, max_length) + "..."
+	return text.substr(0, max_len) + "..."

@@ -19,6 +19,14 @@ class WorkerState(str, Enum):
     COOLDOWN = "cooldown"             # 自主循环冷却，整理状态
 
 
+# 不在工位的 FSM 状态：闲逛、休息、找同事。会议是老板指令驱动，不计入并发限制。
+AWAY_FROM_DESK_STATES: frozenset[WorkerState] = frozenset({
+    WorkerState.ROAMING,
+    WorkerState.RESTING,
+    WorkerState.SEEKING_COLLEAGUE,
+})
+
+
 _ALLOWED: dict[WorkerState, frozenset[WorkerState]] = {
     WorkerState.IDLE: frozenset({
         WorkerState.WORKING, WorkerState.ROAMING, WorkerState.RESTING,
